@@ -5,5 +5,4 @@ plotly
 openpyxl
 fpdf
 matplotlib
-gdown
 pyarrow

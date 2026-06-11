@@ -4,13 +4,14 @@ Baixa arquivos parquet do Google Drive quando não encontrados localmente.
 Em desenvolvimento local, usa os arquivos locais diretamente.
 No Streamlit Cloud, baixa para /tmp e cacheia em memória.
 
-NOTA: Para arquivos >40 MB, o Google Drive exige confirmação de download
-(aviso de vírus). O gdown precisa ser chamado com o ID direto para
-contornar isso automaticamente.
+Usa requests (já dependência do Streamlit) com a URL drive.usercontent.google.com,
+que bypassa automaticamente o aviso de vírus para arquivos grandes sem precisar
+de gdown ou tokens de confirmação.
 """
 
 import os
 import logging
+import requests
 import pandas as pd
 import streamlit as st
 
@@ -28,11 +29,11 @@ DRIVE_IDS: dict[str, str] = {
     "fundos_peers_carteira": "1siKr21tYEo9GMVZtz-etHq9lVoQjMx6y",
 }
 
-# Tamanho mínimo em bytes para considerar o download válido (1 MB)
-_MIN_VALID_SIZE = 1 * 1024 * 1024
-
 # Pasta de cache para o Streamlit Cloud (gravável)
 _CACHE_DIR = os.environ.get("PARQUET_CACHE_DIR", "/tmp/fof_data")
+
+# Tamanho de chunk para streaming (1 MB)
+_CHUNK_SIZE = 1024 * 1024
 
 
 def _ensure_cache_dir() -> None:
@@ -52,12 +53,9 @@ def _cache_path(base_name: str) -> str:
 def _is_valid_parquet(path: str) -> bool:
     """
     Verifica se o arquivo é um parquet válido checando o magic number.
-    Parquet começa com os bytes b'PAR1' e termina com b'PAR1'.
-    Evita aceitar páginas HTML do Google Drive como se fossem dados.
+    Parquet começa e termina com os bytes b'PAR1'.
     """
-    if not os.path.exists(path):
-        return False
-    if os.path.getsize(path) < _MIN_VALID_SIZE:
+    if not os.path.exists(path) or os.path.getsize(path) < 4:
         return False
     try:
         with open(path, "rb") as f:
@@ -69,54 +67,58 @@ def _is_valid_parquet(path: str) -> bool:
 
 def _download_from_drive(base_name: str, dest_path: str) -> None:
     """
-    Baixa o arquivo do Google Drive via gdown.
+    Baixa o arquivo do Google Drive via HTTPS streaming com requests.
 
-    Usa o parâmetro `id=` diretamente (em vez de URL) para que o gdown
-    consiga tratar automaticamente o aviso de confirmação do Google para
-    arquivos grandes (>40 MB).
+    Usa drive.usercontent.google.com com confirm=t, que bypassa
+    automaticamente o aviso de confirmação para arquivos grandes (>40 MB),
+    sem precisar de gdown ou cookies de sessão.
     """
-    try:
-        import gdown  # noqa: PLC0415
-    except ImportError as exc:
-        raise ImportError(
-            "Pacote 'gdown' não encontrado. Adicione 'gdown' ao requirements.txt."
-        ) from exc
-
     file_id = DRIVE_IDS.get(base_name)
     if not file_id:
         raise ValueError(f"ID do Drive não cadastrado para '{base_name}'.")
 
+    # Esta URL bypassa o aviso de vírus do Google diretamente
+    url = (
+        "https://drive.usercontent.google.com/download"
+        f"?id={file_id}&export=download&authuser=0&confirm=t"
+    )
+
     _ensure_cache_dir()
 
-    # Remove arquivo corrompido/incompleto antes de tentar de novo
+    # Remove arquivo corrompido/incompleto de tentativas anteriores
     if os.path.exists(dest_path):
         os.remove(dest_path)
 
-    logger.info("Baixando %s do Google Drive (id=%s)…", base_name, file_id)
+    logger.info("Baixando %s do Google Drive…", base_name)
 
-    # Usar id= em vez de URL garante que o gdown lide com a confirmação
-    # de arquivos grandes automaticamente (sem baixar a página de aviso HTML)
-    gdown.download(
-        id=file_id,
-        output=dest_path,
-        quiet=False,
-        resume=False,
-    )
-
-    if not _is_valid_parquet(dest_path):
-        # Remove o arquivo inválido (provavelmente HTML de aviso do Google)
+    try:
+        with requests.get(url, stream=True, timeout=600) as resp:
+            resp.raise_for_status()
+            with open(dest_path, "wb") as f:
+                for chunk in resp.iter_content(chunk_size=_CHUNK_SIZE):
+                    if chunk:
+                        f.write(chunk)
+    except requests.RequestException as exc:
         if os.path.exists(dest_path):
-            bad_size = os.path.getsize(dest_path)
             os.remove(dest_path)
-        else:
-            bad_size = 0
         raise RuntimeError(
-            f"Download de '{base_name}.parquet' falhou ou retornou arquivo inválido "
-            f"({bad_size:,} bytes). Possíveis causas:\n"
-            "  • Arquivo não compartilhado como 'Qualquer pessoa com o link'\n"
-            "  • ID do Drive incorreto\n"
-            "  • Falha temporária de rede"
+            f"Falha ao baixar '{base_name}.parquet' do Google Drive: {exc}"
+        ) from exc
+
+    # Valida que o arquivo baixado é realmente um parquet
+    if not _is_valid_parquet(dest_path):
+        bad_size = os.path.getsize(dest_path) if os.path.exists(dest_path) else 0
+        if os.path.exists(dest_path):
+            os.remove(dest_path)
+        raise RuntimeError(
+            f"Download de '{base_name}.parquet' retornou arquivo inválido "
+            f"({bad_size:,} bytes — esperado um parquet válido).\n"
+            "Verifique se o arquivo está compartilhado como "
+            "'Qualquer pessoa com o link pode visualizar'."
         )
+
+    size_mb = os.path.getsize(dest_path) / 1_048_576
+    logger.info("✓ %s baixado com sucesso (%.1f MB)", base_name, size_mb)
 
 
 @st.cache_data(show_spinner=False)
@@ -125,7 +127,7 @@ def load_parquet(base_name: str) -> pd.DataFrame:
     Carrega um arquivo parquet com fallback automático:
       1. Arquivo local (desenvolvimento)
       2. Cache em /tmp já validado (baixado anteriormente nesta instância)
-      3. Download do Google Drive
+      3. Download do Google Drive via HTTPS
 
     Parameters
     ----------
