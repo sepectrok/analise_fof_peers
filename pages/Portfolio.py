@@ -114,8 +114,8 @@ with st.spinner("Carregando base de dados…"):
     try:
         df_detail, df_pivot, df_check, df_cadastro = _load()
         dados_ok = True
-    except FileNotFoundError as e:
-        st.error(str(e))
+    except Exception as e:
+        st.error(f"❌ Erro ao carregar dados:\n\n{e}")
         dados_ok = False
 
 if not dados_ok:

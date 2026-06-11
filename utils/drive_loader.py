@@ -3,12 +3,9 @@ Drive Loader — FoF Peers Dashboard
 Baixa arquivos parquet do Google Drive quando não encontrados localmente.
 Em desenvolvimento local, usa os arquivos locais diretamente.
 No Streamlit Cloud, baixa para /tmp e cacheia em memória.
-
-Usa requests (já dependência do Streamlit) com a URL drive.usercontent.google.com,
-que bypassa automaticamente o aviso de vírus para arquivos grandes sem precisar
-de gdown ou tokens de confirmação.
 """
 
+import io
 import os
 import logging
 import requests
@@ -29,11 +26,20 @@ DRIVE_IDS: dict[str, str] = {
     "fundos_peers_carteira": "1siKr21tYEo9GMVZtz-etHq9lVoQjMx6y",
 }
 
+# URLs a tentar, em ordem de preferência
+def _drive_urls(file_id: str) -> list[str]:
+    return [
+        # URL moderna — bypassa confirmação de vírus diretamente
+        f"https://drive.usercontent.google.com/download?id={file_id}&export=download&confirm=t",
+        # URL clássica com confirmação explícita
+        f"https://drive.google.com/uc?export=download&id={file_id}&confirm=t",
+    ]
+
 # Pasta de cache para o Streamlit Cloud (gravável)
 _CACHE_DIR = os.environ.get("PARQUET_CACHE_DIR", "/tmp/fof_data")
-
-# Tamanho de chunk para streaming (1 MB)
-_CHUNK_SIZE = 1024 * 1024
+_CHUNK_SIZE = 1024 * 1024  # 1 MB por chunk
+_TIMEOUT    = 600           # 10 minutos (arquivos grandes)
+_MAX_TRIES  = 2
 
 
 def _ensure_cache_dir() -> None:
@@ -41,84 +47,115 @@ def _ensure_cache_dir() -> None:
 
 
 def _local_path(base_name: str) -> str:
-    """Caminho local do arquivo (em desenvolvimento)."""
     return os.path.join(BASE_DIR, f"{base_name}.parquet")
 
 
 def _cache_path(base_name: str) -> str:
-    """Caminho de cache no servidor (Streamlit Cloud)."""
     return os.path.join(_CACHE_DIR, f"{base_name}.parquet")
+
+
+def _remove_if_exists(path: str) -> None:
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+    except OSError:
+        pass
 
 
 def _is_valid_parquet(path: str) -> bool:
     """
-    Verifica se o arquivo é um parquet válido checando o magic number.
-    Parquet começa e termina com os bytes b'PAR1'.
+    Verifica header E footer do arquivo.
+    Parquet válido: primeiros 4 bytes = b'PAR1' e últimos 4 bytes = b'PAR1'.
+    Detecta arquivos truncados, HTML ou qualquer conteúdo inválido.
     """
-    if not os.path.exists(path) or os.path.getsize(path) < 4:
+    if not os.path.exists(path):
+        return False
+    size = os.path.getsize(path)
+    if size < 8:
         return False
     try:
         with open(path, "rb") as f:
             header = f.read(4)
-        return header == b"PAR1"
+            f.seek(-4, 2)       # 4 bytes antes do fim
+            footer = f.read(4)
+        return header == b"PAR1" and footer == b"PAR1"
     except OSError:
         return False
 
 
+def _try_download_url(url: str, dest_path: str, label: str) -> bool:
+    """
+    Tenta baixar o arquivo de uma URL específica.
+    Retorna True se baixou e validou com sucesso, False caso contrário.
+    """
+    _remove_if_exists(dest_path)
+    try:
+        with requests.get(url, stream=True, timeout=_TIMEOUT) as resp:
+            # Detecta resposta HTML (página de erro/aviso do Google)
+            content_type = resp.headers.get("Content-Type", "")
+            if "text/html" in content_type:
+                logger.warning(
+                    "[%s] Google retornou HTML (content-type: %s). "
+                    "Arquivo pode não estar compartilhado corretamente.",
+                    label, content_type,
+                )
+                return False
+
+            if not resp.ok:
+                logger.warning("[%s] HTTP %s para URL %s", label, resp.status_code, url)
+                return False
+
+            with open(dest_path, "wb") as f:
+                for chunk in resp.iter_content(chunk_size=_CHUNK_SIZE):
+                    if chunk:
+                        f.write(chunk)
+
+    except requests.RequestException as exc:
+        logger.warning("[%s] Falha de rede: %s", label, exc)
+        _remove_if_exists(dest_path)
+        return False
+
+    if not _is_valid_parquet(dest_path):
+        size = os.path.getsize(dest_path) if os.path.exists(dest_path) else 0
+        logger.warning(
+            "[%s] Arquivo baixado não é parquet válido (%d bytes).", label, size
+        )
+        _remove_if_exists(dest_path)
+        return False
+
+    size_mb = os.path.getsize(dest_path) / 1_048_576
+    logger.info("[%s] Download OK (%.1f MB)", label, size_mb)
+    return True
+
+
 def _download_from_drive(base_name: str, dest_path: str) -> None:
     """
-    Baixa o arquivo do Google Drive via HTTPS streaming com requests.
-
-    Usa drive.usercontent.google.com com confirm=t, que bypassa
-    automaticamente o aviso de confirmação para arquivos grandes (>40 MB),
-    sem precisar de gdown ou cookies de sessão.
+    Baixa o arquivo do Google Drive com múltiplas URLs de fallback e retry.
+    Lança RuntimeError se todas as tentativas falharem.
     """
     file_id = DRIVE_IDS.get(base_name)
     if not file_id:
         raise ValueError(f"ID do Drive não cadastrado para '{base_name}'.")
 
-    # Esta URL bypassa o aviso de vírus do Google diretamente
-    url = (
-        "https://drive.usercontent.google.com/download"
-        f"?id={file_id}&export=download&authuser=0&confirm=t"
-    )
-
+    urls = _drive_urls(file_id)
     _ensure_cache_dir()
 
-    # Remove arquivo corrompido/incompleto de tentativas anteriores
-    if os.path.exists(dest_path):
-        os.remove(dest_path)
+    for attempt in range(1, _MAX_TRIES + 1):
+        for url in urls:
+            label = f"{base_name} · tentativa {attempt}"
+            logger.info("[%s] Tentando URL: %s", label, url)
+            if _try_download_url(url, dest_path, label):
+                return   # sucesso!
 
-    logger.info("Baixando %s do Google Drive…", base_name)
-
-    try:
-        with requests.get(url, stream=True, timeout=600) as resp:
-            resp.raise_for_status()
-            with open(dest_path, "wb") as f:
-                for chunk in resp.iter_content(chunk_size=_CHUNK_SIZE):
-                    if chunk:
-                        f.write(chunk)
-    except requests.RequestException as exc:
-        if os.path.exists(dest_path):
-            os.remove(dest_path)
-        raise RuntimeError(
-            f"Falha ao baixar '{base_name}.parquet' do Google Drive: {exc}"
-        ) from exc
-
-    # Valida que o arquivo baixado é realmente um parquet
-    if not _is_valid_parquet(dest_path):
-        bad_size = os.path.getsize(dest_path) if os.path.exists(dest_path) else 0
-        if os.path.exists(dest_path):
-            os.remove(dest_path)
-        raise RuntimeError(
-            f"Download de '{base_name}.parquet' retornou arquivo inválido "
-            f"({bad_size:,} bytes — esperado um parquet válido).\n"
-            "Verifique se o arquivo está compartilhado como "
-            "'Qualquer pessoa com o link pode visualizar'."
-        )
-
-    size_mb = os.path.getsize(dest_path) / 1_048_576
-    logger.info("✓ %s baixado com sucesso (%.1f MB)", base_name, size_mb)
+    # Todas as tentativas falharam
+    raise RuntimeError(
+        f"❌ Não foi possível baixar '{base_name}.parquet' do Google Drive "
+        f"após {_MAX_TRIES} tentativas.\n\n"
+        "Verifique:\n"
+        "  • O arquivo está compartilhado como **'Qualquer pessoa com o link pode visualizar'**\n"
+        f"  • O ID do Drive está correto: `{file_id}`\n"
+        "  • O arquivo não foi movido ou excluído do Drive"
+    )
 
 
 @st.cache_data(show_spinner=False)
@@ -127,7 +164,7 @@ def load_parquet(base_name: str) -> pd.DataFrame:
     Carrega um arquivo parquet com fallback automático:
       1. Arquivo local (desenvolvimento)
       2. Cache em /tmp já validado (baixado anteriormente nesta instância)
-      3. Download do Google Drive via HTTPS
+      3. Download do Google Drive com retry
 
     Parameters
     ----------
@@ -143,10 +180,16 @@ def load_parquet(base_name: str) -> pd.DataFrame:
     if os.path.exists(local):
         return pd.read_parquet(local, engine="pyarrow")
 
-    # 2️⃣ Cache do servidor — só usa se for um parquet válido
+    # 2️⃣ Cache do servidor — valida header + footer antes de usar
     cached = _cache_path(base_name)
     if _is_valid_parquet(cached):
-        return pd.read_parquet(cached, engine="pyarrow")
+        try:
+            df = pd.read_parquet(cached, engine="pyarrow")
+            if len(df.columns) > 0:
+                return df
+        except Exception as exc:
+            logger.warning("Cache corrompido para '%s': %s. Re-baixando…", base_name, exc)
+            _remove_if_exists(cached)
 
     # 3️⃣ Download do Google Drive
     if base_name not in DRIVE_IDS:
@@ -156,4 +199,11 @@ def load_parquet(base_name: str) -> pd.DataFrame:
         )
 
     _download_from_drive(base_name, cached)
-    return pd.read_parquet(cached, engine="pyarrow")
+
+    try:
+        return pd.read_parquet(cached, engine="pyarrow")
+    except Exception as exc:
+        _remove_if_exists(cached)
+        raise RuntimeError(
+            f"Parquet de '{base_name}' baixado mas inválido ao ler: {exc}"
+        ) from exc
