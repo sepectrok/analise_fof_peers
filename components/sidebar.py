@@ -15,12 +15,11 @@ def load_css():
     st.markdown(f"<style>{css}</style>", unsafe_allow_html=True)
 
     # ── Botão flutuante para abrir/fechar a sidebar ──────────────────────────
-    import streamlit.components.v1 as components
-    components.html("""
+    st.html("""
     <script>
     (function() {
-        var doc = window.parent.document;
-        var win = window.parent;
+        var doc = document;
+        var win = window;
 
         function reactClick(el) {
             el.dispatchEvent(new MouseEvent('click', {
@@ -147,10 +146,11 @@ def load_css():
         obs.observe(doc.body, { childList: true, subtree: false });
     })();
     </script>
-    """, height=1, scrolling=False)
+    """)
 
 
 def _get_logo_html() -> str:
+
     """Retorna HTML do logo SVG vertical (site oficial) ou PNG fallback."""
     # 1. Tenta SVG vertical baixado do site
     base_dir = os.path.dirname(os.path.dirname(__file__))
