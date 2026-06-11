@@ -1,0 +1,23 @@
+# Dados (arquivos grandes — hospedados no Google Drive)
+*.parquet
+*.xlsx
+*.csv
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.env
+venv/
+.venv/
+
+# Jupyter
+*.ipynb_checkpoints/
+.ipynb_checkpoints
+
+# IDE
+.vscode/
+.idea/
+
+# Streamlit
+.streamlit/secrets.toml
