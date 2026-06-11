@@ -59,7 +59,7 @@ def _download_from_drive(base_name: str, dest_path: str) -> None:
     logger.info("Baixando %s do Google Drive…", base_name)
 
     _ensure_cache_dir()
-    gdown.download(url, dest_path, quiet=False, fuzzy=True)
+    gdown.download(url, dest_path, quiet=False)
 
     if not os.path.exists(dest_path) or os.path.getsize(dest_path) == 0:
         raise RuntimeError(
