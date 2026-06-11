@@ -100,6 +100,28 @@ def _load():
     except Exception:
         cadastro = pd.DataFrame()
 
+    # ── Validação de colunas obrigatórias ──────────────────────────────────────
+    # Se o arquivo errado foi baixado, o erro aparece aqui com diagnóstico claro
+    _req_detail = {"Data_Posicao", "Nome_Fundo_CVM", "PL"}
+    _req_pivot  = {"Data_Posicao", "Nome_Fundo_CVM", "PL_Est_Cap"}
+
+    _miss_detail = _req_detail - set(detail.columns)
+    _miss_pivot  = _req_pivot  - set(pivot.columns)
+
+    if _miss_detail:
+        raise ValueError(
+            f"blc_total_detail.parquet está incorreto ou corrompido.\n"
+            f"Colunas ausentes: {sorted(_miss_detail)}\n"
+            f"Colunas encontradas ({len(detail.columns)}): {sorted(detail.columns)}"
+        )
+    if _miss_pivot:
+        raise ValueError(
+            f"blc_total_pivot.parquet está incorreto ou corrompido.\n"
+            f"Colunas ausentes: {sorted(_miss_pivot)}\n"
+            f"Colunas encontradas ({len(pivot.columns)}): {sorted(pivot.columns)}"
+        )
+    # ──────────────────────────────────────────────────────────────────────────
+
     for col in ("PL", "Valor_Presente", "Quantidade_Posicao"):
         if col in detail.columns:
             detail[col] = pd.to_numeric(detail[col], errors="coerce")
@@ -115,7 +137,7 @@ with st.spinner("Carregando base de dados…"):
         df_detail, df_pivot, df_check, df_cadastro = _load()
         dados_ok = True
     except Exception as e:
-        st.error(f"❌ Erro ao carregar dados:\n\n{e}")
+        st.error(f"Erro ao carregar dados:\n\n{e}")
         dados_ok = False
 
 if not dados_ok:

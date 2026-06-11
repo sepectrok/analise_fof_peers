@@ -161,10 +161,8 @@ def _download_from_drive(base_name: str, dest_path: str) -> None:
 @st.cache_data(show_spinner=False)
 def load_parquet(base_name: str) -> pd.DataFrame:
     """
-    Carrega um arquivo parquet com fallback automático:
-      1. Arquivo local (desenvolvimento)
-      2. Cache em /tmp já validado (baixado anteriormente nesta instância)
-      3. Download do Google Drive com retry
+    Carrega um arquivo parquet sempre do Google Drive (sem fallback local).
+    Usa cache em /tmp para evitar re-download na mesma instância do servidor.
 
     Parameters
     ----------
@@ -175,35 +173,35 @@ def load_parquet(base_name: str) -> pd.DataFrame:
     -------
     pd.DataFrame
     """
-    # 1️⃣ Arquivo local (desenvolvimento)
-    local = _local_path(base_name)
-    if os.path.exists(local):
-        return pd.read_parquet(local, engine="pyarrow")
+    if base_name not in DRIVE_IDS:
+        raise FileNotFoundError(
+            f"Arquivo '{base_name}.parquet' não possui ID do Drive cadastrado."
+        )
 
-    # 2️⃣ Cache do servidor — valida header + footer antes de usar
+    # Cache do servidor — só usa se for um parquet válido (header + footer)
     cached = _cache_path(base_name)
     if _is_valid_parquet(cached):
         try:
             df = pd.read_parquet(cached, engine="pyarrow")
             if len(df.columns) > 0:
+                logger.info("[%s] Lido do cache (%d colunas, %d linhas)",
+                            base_name, len(df.columns), len(df))
                 return df
         except Exception as exc:
-            logger.warning("Cache corrompido para '%s': %s. Re-baixando…", base_name, exc)
+            logger.warning("[%s] Cache corrompido: %s. Re-baixando…", base_name, exc)
             _remove_if_exists(cached)
 
-    # 3️⃣ Download do Google Drive
-    if base_name not in DRIVE_IDS:
-        raise FileNotFoundError(
-            f"Arquivo '{base_name}.parquet' não encontrado localmente "
-            f"e não possui ID do Drive cadastrado."
-        )
-
+    # Download do Google Drive
     _download_from_drive(base_name, cached)
 
     try:
-        return pd.read_parquet(cached, engine="pyarrow")
+        df = pd.read_parquet(cached, engine="pyarrow")
     except Exception as exc:
         _remove_if_exists(cached)
         raise RuntimeError(
-            f"Parquet de '{base_name}' baixado mas inválido ao ler: {exc}"
+            f"[{base_name}] Parquet baixado mas inválido ao ler com pandas: {exc}"
         ) from exc
+
+    logger.info("[%s] Download OK — %d colunas: %s",
+                base_name, len(df.columns), list(df.columns))
+    return df
