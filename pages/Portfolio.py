@@ -3,6 +3,7 @@ Solis — Portfólio do Fundo (FoF Peers Dashboard)
 """
 import streamlit as st
 import pandas as pd
+import polars as pl
 import plotly.express as px
 import plotly.graph_objects as go
 import os
@@ -105,31 +106,28 @@ def _load():
     _req_detail = {"Data_Posicao", "Nome_Fundo_CVM", "PL"}
     _req_pivot  = {"Data_Posicao", "Nome_Fundo_CVM", "PL_Est_Cap"}
 
-    _miss_detail = _req_detail - set(detail.columns)
-    _miss_pivot  = _req_pivot  - set(pivot.columns)
+    _miss_detail = _req_detail - set(detail.collect_schema().names())
+    _miss_pivot  = _req_pivot  - set(pivot.collect_schema().names())
 
     if _miss_detail:
         raise ValueError(
             f"blc_total_detail.parquet está incorreto ou corrompido.\n"
             f"Colunas ausentes: {sorted(_miss_detail)}\n"
-            f"Colunas encontradas ({len(detail.columns)}): {sorted(detail.columns)}"
+            f"Colunas encontradas: {sorted(detail.collect_schema().names())}"
         )
     if _miss_pivot:
         raise ValueError(
             f"blc_total_pivot.parquet está incorreto ou corrompido.\n"
             f"Colunas ausentes: {sorted(_miss_pivot)}\n"
-            f"Colunas encontradas ({len(pivot.columns)}): {sorted(pivot.columns)}"
+            f"Colunas encontradas: {sorted(pivot.collect_schema().names())}"
         )
     # ──────────────────────────────────────────────────────────────────────────
 
-    for col in ("PL", "Valor_Presente", "Quantidade_Posicao"):
-        if col in detail.columns:
-            detail[col] = pd.to_numeric(detail[col], errors="coerce")
-    for col in ("PL_Conta", "PL_Est_Cap", "Percentual", "Percentual_Conta_PL_Est_Cap"):
-        if col in pivot.columns:
-            pivot[col] = pd.to_numeric(pivot[col], errors="coerce")
+    # Os df_check e df_cadastro são pequenos, podemos trazer para memória direto
+    check_pd = check.collect().to_pandas() if hasattr(check, 'collect') else check
+    cadastro_pd = cadastro.collect().to_pandas() if hasattr(cadastro, 'collect') else cadastro
 
-    return detail, pivot, check, cadastro
+    return detail, pivot, check_pd, cadastro_pd
 
 
 with st.spinner("Carregando base de dados…"):
@@ -151,14 +149,33 @@ mes_sel  = sel["mes_sel"]
 mes_str  = sel["mes_str"]
 fundo_sel = sel["fundo_sel"]
 
-mask_mes   = df_pivot["Data_Posicao"].dt.to_period("M") == mes_sel
-mask_fundo = df_pivot["Nome_Fundo_CVM"] == fundo_sel
-df_pivot_mes   = df_pivot[mask_mes].copy()
-df_pivot_fundo = df_pivot_mes[mask_fundo].copy()
+start_dt = mes_sel.start_time
+end_dt = mes_sel.end_time
 
-mask_detail_mes   = df_detail["Data_Posicao"].dt.to_period("M") == mes_sel
-mask_detail_fundo = df_detail["Nome_Fundo_CVM"] == fundo_sel
-df_fundo = df_detail[mask_detail_mes & mask_detail_fundo].copy()
+# Filtra pivot
+df_pivot_mes_lf = df_pivot.filter(
+    (pl.col("Data_Posicao") >= start_dt) & 
+    (pl.col("Data_Posicao") <= end_dt)
+)
+df_pivot_mes = df_pivot_mes_lf.collect().to_pandas()
+
+df_pivot_fundo_lf = df_pivot_mes_lf.filter(pl.col("Nome_Fundo_CVM") == fundo_sel)
+df_pivot_fundo = df_pivot_fundo_lf.collect().to_pandas()
+
+# Filtra detail
+df_fundo_lf = df_detail.filter(
+    (pl.col("Data_Posicao") >= start_dt) & 
+    (pl.col("Data_Posicao") <= end_dt) &
+    (pl.col("Nome_Fundo_CVM") == fundo_sel)
+)
+df_fundo = df_fundo_lf.collect().to_pandas()
+
+for col in ("PL", "Valor_Presente", "Quantidade_Posicao"):
+    if col in df_fundo.columns:
+        df_fundo[col] = pd.to_numeric(df_fundo[col], errors="coerce")
+for col in ("PL_Conta", "PL_Est_Cap", "Percentual", "Percentual_Conta_PL_Est_Cap"):
+    if col in df_pivot_fundo.columns:
+        df_pivot_fundo[col] = pd.to_numeric(df_pivot_fundo[col], errors="coerce")
 
 # PL do fundo
 pl_est = df_pivot_fundo["PL_Est_Cap"].iloc[0] if not df_pivot_fundo.empty else 0
@@ -387,7 +404,7 @@ with tab_emissores:
 
 # ── TAB 3: Evolução Histórica ─────────────────────────────────────────────────
 with tab_historico:
-    df_hist = df_detail[df_detail["Nome_Fundo_CVM"] == fundo_sel].copy()
+    df_hist = df_detail.filter(pl.col("Nome_Fundo_CVM") == fundo_sel).collect().to_pandas()
     if df_hist.empty:
         st.info("Sem histórico disponível.")
     else:

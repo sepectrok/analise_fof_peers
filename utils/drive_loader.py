@@ -10,6 +10,7 @@ import tempfile
 import logging
 import requests
 import pandas as pd
+import polars as pl
 import streamlit as st
 
 logger = logging.getLogger(__name__)
@@ -190,8 +191,7 @@ def _download_from_drive(base_name: str, dest_path: str) -> None:
     )
 
 
-@st.cache_data(show_spinner=False)
-def load_parquet(base_name: str) -> pd.DataFrame:
+def load_parquet(base_name: str) -> pl.LazyFrame:
     """
     Carrega um arquivo parquet do Google Drive.
     Usa cache em disco para evitar re-download, mas invalida automaticamente
@@ -204,7 +204,7 @@ def load_parquet(base_name: str) -> pd.DataFrame:
 
     Returns
     -------
-    pd.DataFrame
+    pl.LazyFrame
     """
     if base_name not in DRIVE_IDS:
         raise FileNotFoundError(
@@ -216,11 +216,9 @@ def load_parquet(base_name: str) -> pd.DataFrame:
     # Cache válido = parquet íntegro (PAR1 header+footer) E ID ainda é o mesmo
     if _is_valid_parquet(cached) and _cache_id_matches(base_name):
         try:
-            df = pd.read_parquet(cached, engine="pyarrow")
-            if len(df.columns) > 0:
-                logger.info("[%s] Lido do cache (%d colunas, %d linhas)",
-                            base_name, len(df.columns), len(df))
-                return df
+            lf = pl.scan_parquet(cached)
+            logger.info("[%s] LazyFrame carregado do cache", base_name)
+            return lf
         except Exception as exc:
             logger.warning("[%s] Cache corrompido ao ler: %s. Re-baixando…", base_name, exc)
 
@@ -229,13 +227,12 @@ def load_parquet(base_name: str) -> pd.DataFrame:
     _download_from_drive(base_name, cached)
 
     try:
-        df = pd.read_parquet(cached, engine="pyarrow")
+        lf = pl.scan_parquet(cached)
     except Exception as exc:
         _invalidate_cache(base_name)
         raise RuntimeError(
-            f"[{base_name}] Parquet baixado mas inválido ao ler com pandas: {exc}"
+            f"[{base_name}] Parquet baixado mas inválido ao ler com polars: {exc}"
         ) from exc
 
-    logger.info("[%s] Download OK — %d colunas: %s",
-                base_name, len(df.columns), list(df.columns))
-    return df
+    logger.info("[%s] Download OK — LazyFrame criado", base_name)
+    return lf

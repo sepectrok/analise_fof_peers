@@ -4,6 +4,7 @@ Reutiliza load_css() e o design system Solis existente.
 """
 import streamlit as st
 import pandas as pd
+import polars as pl
 import os
 import base64
 from components.sidebar import load_css, _get_logo_html   # reutiliza CSS e logo
@@ -41,7 +42,7 @@ def _find_default_index(fundos: list[str], termo: str) -> int:
     return 0
 
 
-def render_sidebar_fof(df_pivot: pd.DataFrame, df_detail: pd.DataFrame) -> dict:
+def render_sidebar_fof(df_pivot: pl.LazyFrame, df_detail: pl.LazyFrame) -> dict:
     """
     Renderiza a sidebar do dashboard FoF.
     Retorna dict com 'mes_sel', 'mes_str', 'fundo_sel'.
@@ -61,10 +62,9 @@ def render_sidebar_fof(df_pivot: pd.DataFrame, df_detail: pd.DataFrame) -> dict:
         )
 
         # ── Mês ────────────────────────────────────────────────────────────
-        meses = sorted(
-            df_pivot["Data_Posicao"].dropna().dt.to_period("M").unique(),
-            reverse=True
-        )
+        meses_dt = (df_pivot.select(pl.col("Data_Posicao").drop_nulls().dt.truncate("1mo"))
+                    .unique().collect().get_column("Data_Posicao").to_list())
+        meses = sorted([pd.Period(m, freq="M") for m in meses_dt], reverse=True)
         mes_options = [str(m) for m in meses]
         mes_str = st.selectbox("Mês de Posição", mes_options, key="fof_mes")
 
@@ -73,9 +73,14 @@ def render_sidebar_fof(df_pivot: pd.DataFrame, df_detail: pd.DataFrame) -> dict:
         # valor original da lista. O usuário pode digitar livremente dentro
         # do selectbox para filtrar — sem precisar apagar caractere a caractere.
         mes_sel = pd.Period(mes_str, freq="M")
-        mask = df_pivot["Data_Posicao"].dt.to_period("M") == mes_sel
+        start_dt = mes_sel.start_time
+        end_dt = mes_sel.end_time
+        
         fundos = sorted(
-            df_pivot.loc[mask, "Nome_Fundo_CVM"].dropna().unique().tolist()
+            df_pivot.filter(
+                (pl.col("Data_Posicao") >= start_dt) & 
+                (pl.col("Data_Posicao") <= end_dt)
+            ).select("Nome_Fundo_CVM").drop_nulls().unique().collect().get_column("Nome_Fundo_CVM").to_list()
         )
 
         # Índice padrão: Solis Capital Core (ou 0 se não encontrar)
@@ -90,8 +95,11 @@ def render_sidebar_fof(df_pivot: pd.DataFrame, df_detail: pd.DataFrame) -> dict:
         )
 
         # ── Stats dinâmicos ────────────────────────────────────────────────
-        n_fundos  = df_pivot.loc[mask, "ID_CNPJ_Fundo"].nunique()
-        n_meses   = df_pivot["Data_Posicao"].dt.to_period("M").nunique()
+        n_fundos  = df_pivot.filter(
+            (pl.col("Data_Posicao") >= start_dt) & 
+            (pl.col("Data_Posicao") <= end_dt)
+        ).select(pl.col("ID_CNPJ_Fundo").n_unique()).collect().item()
+        n_meses   = df_pivot.select(pl.col("Data_Posicao").drop_nulls().dt.truncate("1mo").n_unique()).collect().item()
 
         st.markdown("---")
         st.markdown(f"""

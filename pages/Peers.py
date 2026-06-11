@@ -3,6 +3,7 @@ Solis — Análise de Peers (FoF Peers Dashboard)
 """
 import streamlit as st
 import pandas as pd
+import polars as pl
 import plotly.express as px
 import plotly.graph_objects as go
 import os
@@ -103,12 +104,8 @@ def fmt_brl(v, suffix="M"):
 # ─────────────────────────────────────────
 # CARREGAMENTO
 # ─────────────────────────────────────────
-@st.cache_data(show_spinner=False)
 def _load():
     pivot = load_parquet("blc_total_pivot")
-    for col in ("PL_Conta", "PL_Est_Cap", "Percentual", "Percentual_Conta_PL_Est_Cap"):
-        if col in pivot.columns:
-            pivot[col] = pd.to_numeric(pivot[col], errors="coerce")
     return pivot
 
 
@@ -131,8 +128,19 @@ mes_sel  = sel["mes_sel"]
 mes_str  = sel["mes_str"]
 fundo_alvo = sel["fundo_sel"]
 
-mask_mes = df_pivot["Data_Posicao"].dt.to_period("M") == mes_sel
-df_pivot_mes = df_pivot[mask_mes].copy()
+start_dt = mes_sel.start_time
+end_dt = mes_sel.end_time
+
+df_pivot_mes_lf = df_pivot.filter(
+    (pl.col("Data_Posicao") >= start_dt) & 
+    (pl.col("Data_Posicao") <= end_dt)
+)
+df_pivot_mes = df_pivot_mes_lf.collect().to_pandas()
+
+for col in ("PL_Conta", "PL_Est_Cap", "Percentual", "Percentual_Conta_PL_Est_Cap"):
+    if col in df_pivot_mes.columns:
+        df_pivot_mes[col] = pd.to_numeric(df_pivot_mes[col], errors="coerce")
+
 df_alvo_rows = df_pivot_mes[df_pivot_mes["Nome_Fundo_CVM"] == fundo_alvo].copy()
 
 cnpj_alvo = df_alvo_rows["ID_CNPJ_Fundo"].iloc[0] if not df_alvo_rows.empty else None
