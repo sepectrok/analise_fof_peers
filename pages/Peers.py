@@ -306,6 +306,12 @@ if prazo_alvo_valido and "Prazo_conversao" in peers.columns:
 
 peers = peers.sort_values("Pct_FIDC", ascending=False).reset_index(drop=True)
 
+# ── Persistir contexto para a aba Retornos & Risco ───────────────────────────
+st.session_state["cnpj_alvo"] = cnpj_alvo
+st.session_state["peers_filtrados"] = [
+    {"cnpj": row["ID_CNPJ_Fundo"], "nome": row["Nome_Fundo_CVM"]}
+    for _, row in peers.iterrows()
+]
 
 # ─────────────────────────────────────────
 # RESULTADOS

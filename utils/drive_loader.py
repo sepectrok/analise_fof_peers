@@ -22,6 +22,9 @@ DRIVE_IDS: dict[str, str] = {
     "check_pl":              "1LAnXXt2dHwAovjxXsNrR_fH56YJEmkhB",
     "cadastro_fof":          "1TIBeGxkUmU7FWadZlcKDV8R4kOxhD8Kg",
     "fundos_peers_carteira": "1huyqtuToBuYsOT2gYajmi5jSvvn-iy0Z",
+    # ── Retornos ANBIMA ── preencher após upload no Google Drive ────────────
+    "historico_anbima":      "1fb5m3s8E0RlWi1B4kWlthghhPPPlxDSR",
+    "cdi":                   "1FH3ha-oOASxb2dQ12Nsdw997Q7qnslWI",
 }
 
 # URLs a tentar, em ordem de preferência

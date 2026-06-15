@@ -91,8 +91,10 @@ def render_sidebar_fof(df_pivot: pl.LazyFrame, df_detail: pl.LazyFrame) -> dict:
             options=fundos,
             index=idx_padrao,
             format_func=_shorten,
-            key="fof_fundo",
+            key="fof_fundo_portfolio",
         )
+        # Persiste o nome para que Retornos.py pré-selecione o mesmo fundo
+        st.session_state["fof_fundo_nome"] = fundo_str
 
         # ── Stats dinâmicos ────────────────────────────────────────────────
         n_fundos  = df_pivot.filter(

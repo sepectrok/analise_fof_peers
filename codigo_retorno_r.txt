@@ -1,0 +1,468 @@
+
+id_cnpj_fundo <- "55318040000178"
+
+df_cdi <- dbGetQuery(db_acesso, "SELECT * FROM GRL.Bench.DI_Efet") %>% 
+  transmute(Data_Posicao, DI_aa, DI_aa_ftr = (1 + DI_aa/100), 
+            DI_ad_ftr = DI_aa_ftr^(1/252), DI_ad = DI_ad_ftr - 1) %>%
+  select(Data_Posicao, DI_aa, DI_ad, DI_aa_ftr, DI_ad_ftr)
+
+return_funds_anbima <- function(id_cnpj_fundo, data_maxima, atualizar_base = F) {
+  
+  if(atualizar_base == T) {
+    buscar_historico_fundo(id_cnpj_fundo)
+  } 
+  
+  nome_fundo <- pull(distinct(filter(fundos_peers_carteira, ID_CNPJ_Fundo == id_cnpj_fundo)), Nome_Fundo_CVM)
+  
+  cat("Executando", nome_fundo)
+  
+  dados_historico_anbima <- db_acesso %>%
+    tbl(dbplyr::in_schema(sql("BdTeste.Anbima"), sql("Historico"))) %>%
+    filter(ID_CNPJ_Fundo == !!id_cnpj_fundo & Data_Posicao <= data_maxima) %>%
+    #filter(Codigo_Subclasse == "S0000498149") %>%
+    collect() %>%
+    mutate(Codigo_Subclasse = if_else(Codigo_Classe == Codigo_Subclasse & stringr::str_detect(Codigo_Subclasse, "C"), stringr::str_replace(Codigo_Subclasse, "C", "S"), Codigo_Subclasse)) %>%
+    left_join(select(df_subclasse, ID_CNPJ_Fundo, Codigo_Subclasse, Nome_Comercial_Subclasse), join_by(Codigo_Subclasse, ID_CNPJ_Fundo))
+  
+  df_retorno <- select(dados_historico_anbima, ID_CNPJ_Fundo, Codigo_Subclasse, Data_Posicao, PU_Cota, PL_Total) %>%
+    group_by(ID_CNPJ_Fundo, Codigo_Subclasse) %>%
+    arrange(Data_Posicao) %>%
+    mutate(COTA_ad_ftr = PU_Cota/lag(PU_Cota),
+           COTA_ad = COTA_ad_ftr - 1,
+           COTA_aa_ftr = COTA_ad_ftr^252,
+           COTA_aa = COTA_aa_ftr-1) %>%
+    left_join(df_cdi, join_by(Data_Posicao)) %>%
+    ungroup() |>
+    mutate(
+      # Marca o primeiro dia quando o fator = 1 (dia sem negócio / início de série)
+      Inicio = (Data_Posicao == min(Data_Posicao)) & (is.na(COTA_ad_ftr))
+    ) |>
+    filter(!Inicio)
+  
+  data_ref   <- as.Date(max(df_retorno$Data_Posicao))
+  inicio_12m <- data_ref %m-% months(12)
+  inicio_24m <- data_ref %m-% months(24)
+  
+  # ── 2.1 Acumulado 12M ---------------------------------------------------------
+  
+  df_12M_acc_temp <- df_retorno |>
+    filter(Data_Posicao >= inicio_12m)
+  
+  df_12M_acc <- df_12M_acc_temp %>%
+    summarise(
+      Ret_FD_acc_12M    = prod(COTA_ad_ftr)-1,
+      Ret_DI_acc_12M    = prod(DI_ad_ftr)-1,
+      Ret_FD_DI_percent_acc_12M = (Ret_FD_acc_12M)/(Ret_DI_acc_12M),
+      Ret_FD_DI_mais_acc_12M = (1+Ret_FD_acc_12M) / (1+Ret_DI_acc_12M),
+      dias_efet = n(),
+      dt_max = max(Data_Posicao),
+      dt_min = min(Data_Posicao)
+    ) |>
+    mutate(Faixa = "12M")
+  
+  # ── 2.2 Acumulado 12M ---------------------------------------------------------
+  
+  df_24M_acc <- df_retorno |>
+    filter(Data_Posicao >= inicio_24m) |>
+    summarise(
+      Ret_FD_acc_24M    = prod(COTA_ad_ftr)-1,
+      Ret_DI_acc_24M    = prod(DI_ad_ftr)-1,
+      Ret_FD_DI_percent_acc_24M = (Ret_FD_acc_24M)/(Ret_DI_acc_24M),
+      Ret_FD_DI_mais_acc_24M = (1+Ret_FD_acc_24M) / (1+Ret_DI_acc_24M),
+      dias_efet = n(),
+      dt_max = max(Data_Posicao),
+      dt_min = min(Data_Posicao)
+    ) |>
+    mutate(Faixa = "24M")
+  
+  # ── 3. Retornos acumulados por período ---------------------------------------
+  
+  df_retorno_final <- df_retorno |>
+    mutate(
+      Ano         = format(as.Date(Data_Posicao), "%Y"),
+      Mes_Ano     = format(as.Date(Data_Posicao), "%m-%Y"),
+      Semestre_Ano = paste0(
+        year(as.Date(Data_Posicao)), "_",
+        if_else(month(as.Date(Data_Posicao)) <= 6, "S1", "S2")
+      ),
+      # Retorno relativo diário (% do CDI)
+      Ret_FD_DI_ad = (COTA_ad_ftr - 1) / (DI_ad_ftr - 1),
+      # Fixos vindos do acumulado 12M
+      Ret_FD_acc_12M    = df_12M_acc$Ret_FD_acc_12M,
+      Ret_DI_acc_12M    = df_12M_acc$Ret_DI_acc_12M,
+      Ret_FD_DI_percent_acc_12M = df_12M_acc$Ret_FD_DI_percent_acc_12M,
+      Ret_FD_DI_mais_acc_12M = df_12M_acc$Ret_FD_DI_mais_acc_12M,
+      # Fixos vindos do acumulado 24M
+      Ret_FD_acc_24M    = df_24M_acc$Ret_FD_acc_24M,
+      Ret_DI_acc_24M    = df_24M_acc$Ret_DI_acc_24M,
+      Ret_FD_DI_percent_acc_24M = df_24M_acc$Ret_FD_DI_percent_acc_24M,
+      Ret_FD_DI_mais_acc_24M = df_24M_acc$Ret_FD_DI_mais_acc_24M,
+      Ret_FD_Total = prod(COTA_ad_ftr)-1,
+      Ret_DI_Total = prod(DI_ad_ftr)-1,
+      Ret_FD_DI_mais_Total = (1+Ret_FD_Total)/(1+Ret_DI_Total)-1,
+      Ret_FD_DI_percent_Total = (Ret_FD_Total) / (Ret_DI_Total),
+      Dias_total = n()
+      ) |>
+    # Acumulado mensal
+    group_by(Mes_Ano) |>
+    mutate(
+      Ret_FD_acc_am = cumprod(if_else(is.na(COTA_ad_ftr), 1, COTA_ad_ftr)) - 1,
+      Ret_DI_acc_am = cumprod(if_else(is.na(DI_ad_ftr), 1, DI_ad_ftr)) - 1
+    ) |>
+    # Acumulado semestral
+    group_by(Semestre_Ano) |>
+    mutate(
+      Ret_FD_acc_as = cumprod(if_else(is.na(COTA_ad_ftr), 1, COTA_ad_ftr)) - 1,
+      Ret_DI_acc_as = cumprod(if_else(is.na(DI_ad_ftr), 1, DI_ad_ftr)) - 1
+    ) |>
+    # Acumulado anual
+    group_by(Ano) |>
+    mutate(
+      Ret_FD_acc_aa = cumprod(if_else(is.na(COTA_ad_ftr), 1, COTA_ad_ftr)) - 1,
+      Ret_DI_acc_aa = cumprod(if_else(is.na(DI_ad_ftr), 1, DI_ad_ftr)) - 1
+    ) |>
+    ungroup() |>
+    mutate(
+      Ret_FD_DI_acc_am = Ret_FD_acc_am / Ret_DI_acc_am,
+      Ret_FD_DI_acc_as = Ret_FD_acc_as / Ret_DI_acc_as,
+      Ret_FD_DI_acc_aa = Ret_FD_acc_aa / Ret_DI_acc_aa
+    ) |>
+    # Mediana e média diária dentro do mês
+    # group_by(Mes_Ano) |>
+    # mutate(
+    #   Ret_FD_DI_acc_am_median = median(Ret_FD_DI_ad, na.rm = TRUE),
+    #   Ret_FD_acc_am_median    = median(COTA_ad_ftr - 1, na.rm = TRUE),
+    #   Ret_FD_DI_acc_am_mean   = mean(Ret_FD_DI_ad, na.rm = TRUE),
+    #   Ret_FD_acc_am_mean      = mean(COTA_ad_ftr - 1, na.rm = TRUE)
+    # ) |>
+    ungroup() |>
+    # Mantém apenas o último dia (snapshot de hoje)
+    filter(Data_Posicao == max(Data_Posicao)) |>
+    transmute(ID_CNPJ_Fundo,
+              Nome_Fundo = nome_fundo,
+              Codigo_Subclasse,
+              Data_Inicio_Fundo = pull(distinct(filter(fundos_peers_carteira, ID_CNPJ_Fundo == id_cnpj_fundo)), Data_Inicio_Atividade_Classe),
+              Data_Posicao,
+              PU_Cota,
+              PL = PL_Total,
+              COTA_ad,
+              DI_ad,
+              Ret_FD_DI_ad,
+              DI_aa,
+              Ret_FD_acc_12M,
+              Ret_DI_acc_12M,
+              Ret_FD_DI_percent_acc_12M,
+              Ret_FD_DI_mais_acc_12M = Ret_FD_DI_mais_acc_12M-1,
+              Data_Ref_acc_12M  = df_12M_acc$dt_min,
+              Dias_Ref_acc_12M = df_12M_acc$dias_efet,
+              Ret_FD_acc_24M,
+              Ret_DI_acc_24M,
+              Ret_FD_DI_percent_acc_24M,
+              Ret_FD_DI_mais_acc_24M = Ret_FD_DI_mais_acc_24M-1,
+              Data_Ref_acc_24M  = df_24M_acc$dt_min,
+              Dias_Ref_acc_24M = df_24M_acc$dias_efet,
+              Ret_FD_acc_am,
+              Ret_DI_acc_am,
+              Ret_FD_DI_percent_acc_am = Ret_FD_acc_am/Ret_DI_acc_am,
+              Ret_FD_acc_as,
+              Ret_DI_acc_as,
+              Ret_FD_DI_percent_acc_as = Ret_FD_acc_as/Ret_DI_acc_as,
+              Ret_FD_acc_aa,
+              Ret_DI_acc_aa,
+              Ret_FD_DI_percent_acc_aa = Ret_FD_acc_aa/Ret_DI_acc_aa,
+              Ret_FD_Total,
+              Ret_DI_Total,
+              Ret_FD_DI_mais_Total,
+              Ret_FD_DI_percent_Total,
+              Dias_total,
+              Ret_FD_Total_Anualizado = (1+Ret_FD_Total)^(252/Dias_total)-1,
+              Ret_DI_Total_Anualizado = (1+Ret_DI_Total)^(252/Dias_total)-1,
+              Ret_FD_DI_mais_Total_Anualizado = (1+Ret_FD_Total_Anualizado)/(1+Ret_DI_Total_Anualizado)-1,
+              Ret_FD_DI_percent_Total_Anualizado = Ret_FD_Total_Anualizado/Ret_DI_Total_Anualizado,
+    )
+  
+  # ── 4. Risco e Volatilidade ---------------------------------------
+  
+  # =============================================================================
+  # BLOCO — RISCO E VOLATILIDADE
+  # Base: df_retorno já construído no padrão do Bloco 1
+  # =============================================================================
+  
+  library(dplyr)
+  library(lubridate)
+  library(scales)
+  
+  # ── 1. Helpers ---------------------------------------------------------------
+  
+  anualizar_vol <- function(vol_diaria, base = 252) {
+    vol_diaria * sqrt(base)
+  }
+  
+  retorno_acumulado <- function(fatores) {
+    prod(if_else(is.na(fatores), 1, fatores)) - 1
+  }
+  
+  formatar_percentual <- function(x, accuracy = 0.01) {
+    percent(x, accuracy = accuracy, decimal.mark = ",", big.mark = ".")
+  }
+  
+  formatar_numero <- function(x, digits = 2) {
+    formatC(x, digits = digits, format = "f", decimal.mark = ",")
+  }
+  
+  var_param_periodo <- function(media_diaria, vol_diaria, dias, ic = 0.95) {
+    z <- qnorm(ic)
+    -(media_diaria * dias + vol_diaria * sqrt(dias) * z)
+  }
+  
+  cvar_param_periodo <- function(media_diaria, vol_diaria, dias, ic = 0.95) {
+    z <- qnorm(ic)
+    es_z <- dnorm(z) / (1 - ic)
+    -(media_diaria * dias + vol_diaria * sqrt(dias) * es_z)
+  }
+  
+  
+  # ── 2. Janelas ---------------------------------------------------------------
+  
+  data_ref <- as.Date(max(df_retorno$Data_Posicao, na.rm = TRUE))
+  
+  
+  # ── 3. Base auxiliar ---------------------------------------------------------
+  
+  df_risco <- df_retorno |>
+    arrange(ID_CNPJ_Fundo, Codigo_Subclasse, Data_Posicao) |>
+    mutate(
+      Ret_Exc_CDI_ad = COTA_ad - DI_ad
+    )
+  
+  
+  # ── 4. Volatilidade e média diária ------------------------------------------
+  
+  Vol_Diaria <- sd(df_risco$COTA_ad, na.rm = TRUE)
+  Vol_Anual <- anualizar_vol(Vol_Diaria)
+  
+  Media_Diaria <- mean(df_risco$COTA_ad, na.rm = TRUE)
+  
+  
+  # ── 5. Retornos usados no Sharpe --------------------------------------------
+  
+  Ret_FD_12M <- prod(1 + df_12M_acc_temp$COTA_ad, na.rm = TRUE) - 1
+  Ret_DI_12M <- prod(1 + df_12M_acc_temp$DI_ad, na.rm = TRUE) - 1
+
+  Sharpe <- (Ret_FD_12M - Ret_DI_12M) / Vol_Anual
+  
+  # ── 6. Modigliani ------------------------------------------------------------
+  
+  Vol_DI_Anual <- anualizar_vol(sd(df_risco$DI_ad, na.rm = TRUE))
+  
+  Modigliani <- Sharpe * Vol_DI_Anual + Ret_DI_12M
+  CDI_Modigliani <- Ret_DI_12M
+  
+  Modigliani_Texto <- paste0(
+    formatar_percentual(Modigliani),
+    " vs ",
+    formatar_percentual(CDI_Modigliani),
+    " CDI"
+  )
+  
+  
+  # ── 7. Information Ratio e Tracking Error -----------------------------------
+  
+  Tracking_Error <- sd(df_risco$Ret_Exc_CDI_ad, na.rm = TRUE)
+  
+  Information_Ratio <- mean(df_risco$Ret_Exc_CDI_ad, na.rm = TRUE) / Tracking_Error
+  
+  
+  # ── 8. VaR e CVaR paramétricos ----------------------------------------------
+  
+  IC <- 0.95
+  
+  VaR_1M <- var_param_periodo(Media_Diaria, Vol_Diaria, dias = 21, ic = IC)
+  VaR_12M <- var_param_periodo(Media_Diaria, Vol_Diaria, dias = 252, ic = IC)
+  
+  CVaR_1M <- cvar_param_periodo(Media_Diaria, Vol_Diaria, dias = 21, ic = IC)
+  CVaR_12M <- cvar_param_periodo(Media_Diaria, Vol_Diaria, dias = 252, ic = IC)
+  
+  
+  # ── 9. Retornos mensais ------------------------------------------------------
+  
+  df_mensal_risco <- df_risco |>
+    mutate(
+      Mes_Data = floor_date(as.Date(Data_Posicao), "month"),
+      Mes_Ano = format(Mes_Data, "%b/%Y")
+    ) |>
+    group_by(ID_CNPJ_Fundo, Codigo_Subclasse, Mes_Data, Mes_Ano) |>
+    summarise(
+      Ret_FD_acc_am = retorno_acumulado(COTA_ad_ftr),
+      Ret_DI_acc_am = retorno_acumulado(DI_ad_ftr),
+      .groups = "drop"
+    ) |>
+    mutate(
+      Mes_Positivo = Ret_FD_acc_am > 0,
+      Mes_Acima_CDI = Ret_FD_acc_am > Ret_DI_acc_am
+    )
+  
+  Pior_Mes_Linha <- df_mensal_risco |>
+    slice_min(Ret_FD_acc_am, n = 1, with_ties = FALSE)
+  
+  Melhor_Mes_Linha <- df_mensal_risco |>
+    slice_max(Ret_FD_acc_am, n = 1, with_ties = FALSE)
+  
+  Pior_Mes <- Pior_Mes_Linha$Ret_FD_acc_am
+  Pior_Mes_Data <- Pior_Mes_Linha$Mes_Ano
+  
+  Melhor_Mes <- Melhor_Mes_Linha$Ret_FD_acc_am
+  Melhor_Mes_Data <- Melhor_Mes_Linha$Mes_Ano
+  
+  Total_Meses <- nrow(df_mensal_risco)
+  
+  Meses_Positivos_Qtd <- sum(df_mensal_risco$Mes_Positivo, na.rm = TRUE)
+  Meses_Positivos_Pct <- Meses_Positivos_Qtd / Total_Meses
+  
+  Meses_Acima_CDI_Qtd <- sum(df_mensal_risco$Mes_Acima_CDI, na.rm = TRUE)
+  Meses_Acima_CDI_Pct <- Meses_Acima_CDI_Qtd / Total_Meses
+  
+  
+  # ── 10. Extremos diários -----------------------------------------------------
+  
+  Menor_Retorno_Dia_Linha <- df_risco |>
+    filter(!is.na(COTA_ad)) |>
+    slice_min(COTA_ad, n = 1, with_ties = FALSE)
+  
+  Melhor_Retorno_Dia_Linha <- df_risco |>
+    filter(!is.na(COTA_ad)) |>
+    slice_max(COTA_ad, n = 1, with_ties = FALSE)
+  
+  Menor_Retorno_Dia <- Menor_Retorno_Dia_Linha$COTA_ad
+  Menor_Retorno_Dia_Data <- format(as.Date(Menor_Retorno_Dia_Linha$Data_Posicao), "%d/%m/%Y")
+  
+  Melhor_Retorno_Dia <- Melhor_Retorno_Dia_Linha$COTA_ad
+  Melhor_Retorno_Dia_Data <- format(as.Date(Melhor_Retorno_Dia_Linha$Data_Posicao), "%d/%m/%Y")
+  
+  
+  # ── 11. Tabela final organizada ---------------------------------------------
+  
+  metricas_risco <- tibble(
+    Parte = c(
+      "Volatilidade",
+      "Volatilidade",
+      "Retorno Ajustado ao Risco",
+      "Retorno Ajustado ao Risco",
+      "Retorno Ajustado ao Risco",
+      "Retorno Ajustado ao Risco",
+      "Consistência vs CDI",
+      "Consistência vs CDI",
+      "Risco de Perda",
+      "Risco de Perda",
+      "Risco de Perda",
+      "Risco de Perda",
+      "Extremos",
+      "Extremos",
+      "Extremos",
+      "Extremos",
+      "Consistência Mensal",
+      "Consistência Mensal",
+      "Consistência Mensal"
+    ),
+    Metrica = c(
+      "Vol diária",
+      "Vol anual",
+      "Retorno anualizado do Fundo",
+      "Retorno anualizado do CDI",
+      "Sharpe",
+      "Modigliani",
+      "Information Ratio",
+      "Tracking Error",
+      "VaR 1M",
+      "VaR 12M",
+      "CVaR 1M",
+      "CVaR 12M",
+      "Pior mês",
+      "Melhor mês",
+      "Menor retorno em um dia",
+      "Melhor retorno em um dia",
+      "Total meses",
+      "Meses positivos",
+      "Meses acima do CDI"
+    ),
+    Valor = c(
+      formatar_percentual(Vol_Diaria),
+      formatar_percentual(Vol_Anual),
+      formatar_percentual(Ret_FD_12M),
+      formatar_percentual(Ret_DI_12M),
+      formatar_numero(Sharpe),
+      Modigliani_Texto,
+      formatar_numero(Information_Ratio),
+      formatar_percentual(Tracking_Error),
+      formatar_percentual(VaR_1M),
+      formatar_percentual(VaR_12M),
+      formatar_percentual(CVaR_1M),
+      formatar_percentual(CVaR_12M),
+      paste0(formatar_percentual(Pior_Mes), " (", Pior_Mes_Data, ")"),
+      paste0(formatar_percentual(Melhor_Mes), " (", Melhor_Mes_Data, ")"),
+      paste0(formatar_percentual(Menor_Retorno_Dia), " (", Menor_Retorno_Dia_Data, ")"),
+      paste0(formatar_percentual(Melhor_Retorno_Dia), " (", Melhor_Retorno_Dia_Data, ")"),
+      as.character(Total_Meses),
+      paste0(Meses_Positivos_Qtd, " | ", formatar_percentual(Meses_Positivos_Pct)),
+      paste0(Meses_Acima_CDI_Qtd, " | ", formatar_percentual(Meses_Acima_CDI_Pct))
+    ),
+    Descricao = c(
+      paste0("A volatilidade diária é de ", formatar_percentual(Vol_Diaria), "."),
+      paste0("A volatilidade anualizada é de ", formatar_percentual(Vol_Anual), "."),
+      paste0("O retorno anualizado médio do Fundo usado no cálculo do Sharpe é de ", formatar_percentual(Ret_FD_12M), "."),
+      paste0("O retorno anualizado médio do CDI usado no cálculo do Sharpe é de ", formatar_percentual(Ret_DI_12M), "."),
+      paste0("O índice Sharpe é de ", formatar_numero(Sharpe), ", calculado com retorno do Fundo de ", formatar_percentual(Ret_FD_12M), " e CDI de ", formatar_percentual(Ret_DI_12M), "."),
+      paste0("O retorno ajustado pelo risco pelo método Modigliani é de ", Modigliani_Texto, "."),
+      paste0("O Information Ratio é de ", formatar_numero(Information_Ratio), "."),
+      paste0("O Tracking Error é de ", formatar_percentual(Tracking_Error), "."),
+      paste0("O VaR estimado para 1 mês é de ", formatar_percentual(VaR_1M), "."),
+      paste0("O VaR estimado para 12 meses é de ", formatar_percentual(VaR_12M), "."),
+      paste0("O CVaR estimado para 1 mês é de ", formatar_percentual(CVaR_1M), "."),
+      paste0("O CVaR estimado para 12 meses é de ", formatar_percentual(CVaR_12M), "."),
+      paste0("O pior mês foi ", Pior_Mes_Data, ", com retorno de ", formatar_percentual(Pior_Mes), "."),
+      paste0("O melhor mês foi ", Melhor_Mes_Data, ", com retorno de ", formatar_percentual(Melhor_Mes), "."),
+      paste0("O menor retorno em um dia ocorreu em ", Menor_Retorno_Dia_Data, ", com retorno de ", formatar_percentual(Menor_Retorno_Dia), "."),
+      paste0("O melhor retorno em um dia ocorreu em ", Melhor_Retorno_Dia_Data, ", com retorno de ", formatar_percentual(Melhor_Retorno_Dia), "."),
+      paste0("O fundo possui histórico de ", Total_Meses, " meses."),
+      paste0("O fundo terminou ", Meses_Positivos_Qtd, " meses positivos, ou ", formatar_percentual(Meses_Positivos_Pct), " do total de meses."),
+      paste0("O fundo ficou acima do CDI em ", Meses_Acima_CDI_Qtd, " meses, ou ", formatar_percentual(Meses_Acima_CDI_Pct), " do total de meses.")
+    )
+  ) %>%
+    mutate(Nome_Fundo = nome_fundo)
+  
+  metricas_risco_linha <- metricas_risco %>%
+  select(Metrica, Valor) %>%
+  pivot_wider(
+    names_from = Metrica,
+    values_from = Valor
+  ) %>%
+    mutate(Nome_Fundo = nome_fundo,
+              ID_CNPJ_Fundo = id_cnpj_fundo) %>%
+    select(ID_CNPJ_Fundo,
+           Nome_Fundo,
+           everything())
+  
+  # ── 12. Saída ----------------------------------------------------------------
+ 
+  output <- list(
+    retorno = df_retorno_final,
+    metricas_risco_detalhe = metricas_risco,
+    metrica_risco = metricas_risco_linha
+  )
+  cat(" ---> [Finalizado] \n")
+  return(output)
+  
+}
+```
+
+```{r}
+resultado <- map(
+  df_teste_pioneiro$ID_CNPJ_Fundo,
+  data_maxima = "2026-04-29",
+  atualizar_base = F,
+  return_funds_anbima
+)
+
+tb_retorno <- map_dfr(resultado, pluck, "retorno")
+tb_metricas_risco_detalhe <- map_dfr(resultado, pluck, "metricas_risco_detalhe")
+tb_metrica_risco <- map_dfr(resultado, pluck, "metrica_risco")

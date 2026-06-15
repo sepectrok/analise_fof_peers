@@ -16,6 +16,7 @@ pages = {
     "Análise": [
         st.Page("pages/Portfolio.py",  title="Portfólio do Fundo"),
         st.Page("pages/Peers.py",      title="Análise de Peers"),
+        st.Page("pages/Retornos.py",   title="Retornos & Risco"),
     ],
 }
 

@@ -14,6 +14,7 @@ import pyodbc
 import re
 import os
 import pyarrow
+import numpy as np
 
 # ─────────────────────────────────────────
 # CONFIGURAÇÃO
@@ -79,7 +80,32 @@ df_pl               = ler_tabela("SELECT * FROM BdTeste.CVM.CDA_PL")
 df_anbima_fundo     = ler_tabela("SELECT * FROM BdTeste.Anbima.Detalhe_Fundo_Classe")
 df_anbima_subclasse = ler_tabela("SELECT * FROM BdTeste.Anbima.Detalhe_Subclasse")
 
+print("DI_Efet")
 
+# CDI: sem filtro de data — histórico completo necessário para retornos 12M/24M
+df_cdi = ler_tabela("SELECT * FROM GRL.Bench.DI_Efet")
+df_cdi['DI_aa_ftr'] = df_cdi['DI_aa'] / 100 + 1
+df_cdi['DI_ad_ftr'] = df_cdi['DI_aa_ftr']**(1/252)
+df_cdi['DI_ad'] = df_cdi['DI_ad_ftr'] - 1
+df_cdi = df_cdi[['Data_Posicao', 'DI_aa', 'DI_ad', 'DI_aa_ftr', 'DI_ad_ftr']]
+
+print("Historico Anbima")
+
+# Histórico ANBIMA: sem filtro de data — necessário para calcular retornos de longo prazo
+dados_historico_anbima = ler_tabela("SELECT * FROM BdTeste.Anbima.Historico")
+
+# Corrige Codigo_Subclasse: quando Classe == Subclasse e contém 'C', substitui 'C' por 'S'
+mask_igual = dados_historico_anbima['Codigo_Classe'] == dados_historico_anbima['Codigo_Subclasse']
+mask_c     = dados_historico_anbima['Codigo_Subclasse'].str.contains('C', na=False)
+dados_historico_anbima.loc[mask_igual & mask_c, 'Codigo_Subclasse'] = (
+    dados_historico_anbima.loc[mask_igual & mask_c, 'Codigo_Subclasse']
+    .str.replace('C', 'S', n=1, regex=False)
+)
+dados_historico_anbima = dados_historico_anbima.merge(
+    df_anbima_subclasse[['ID_CNPJ_Fundo', 'Codigo_Subclasse', 'Nome_Comercial_Subclasse']],
+    on=['Codigo_Subclasse', 'ID_CNPJ_Fundo'],
+    how='left'
+)
 # ─────────────────────────────────────────
 # 2. CONSOLIDAÇÃO BLC TOTAL (plano de contas)
 # ─────────────────────────────────────────
@@ -305,7 +331,7 @@ blc_total_detail = df_blc_total.merge(
 blc_total_detail['Tipo_Composicao_Ajustado'] = blc_total_detail.apply(
     lambda x: (
         "COTA DE " + (
-            "SEM CADASTRO"
+            "FUNDO SEM CADASTRO NA ANBIMA"
             if pd.isna(x.get('Tipo_Fundo_Investido'))
             else str(x['Tipo_Fundo_Investido']).strip().upper()
         )
@@ -354,15 +380,10 @@ blc_pivot = blc_pivot.merge(
     how='left'
 )
 
-
-# ─────────────────────────────────────────
-# 9. SELEÇÃO DE PEERS (≥30% em FIDC por padrão)
-# ─────────────────────────────────────────
 print("Selecionando peers de FIDC...")
 
 PCT_MIN_FIDC = 0.3
 
-# % total em FIDC por fundo×mês
 pct_fidc = (
     blc_pivot[blc_pivot[grupo_col].str.contains("FIDC", na=False)]
     .groupby(['ID_CNPJ_Fundo', 'Nome_Fundo_CVM', 'Data_Posicao'], as_index=False)
@@ -387,22 +408,20 @@ fundos_peers_carteira = (
     .drop_duplicates(subset=['ID_CNPJ_Fundo', 'Data_Posicao'])
 )
 
-
-# ─────────────────────────────────────────
-# 10. EXPORTAÇÃO — CSV + PARQUET
-# Os arquivos .parquet são lidos pelo Streamlit (5-10x mais rápido que CSV).
-# Os .csv são mantidos como fallback/retrocompatibilidade.
 # ─────────────────────────────────────────
 OUTPUT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # ── Tabelas a exportar ──────────────────────────────────────────────────────
 # (nome_base, dataframe, colunas_de_data_para_normalizar)
 EXPORTS = [
-    ("blc_total_detail",     blc_total_detail,     ["Data_Posicao", "Data_Vencimento"]),
-    ("blc_total_pivot",      blc_pivot,             ["Data_Posicao"]),
-    ("fundos_peers_carteira",fundos_peers_carteira, ["Data_Posicao"]),
-    ("check_pl",             check_pl,              ["Data_Posicao"]),
-    ("cadastro_fof",         dados_cadastro_fof,    []),
+    ("blc_total_detail",     blc_total_detail,         ["Data_Posicao", "Data_Vencimento"]),
+    ("blc_total_pivot",      blc_pivot,                ["Data_Posicao"]),
+    ("fundos_peers_carteira",fundos_peers_carteira,    ["Data_Posicao"]),
+    ("check_pl",             check_pl,                 ["Data_Posicao"]),
+    ("cadastro_fof",         dados_cadastro_fof,       []),
+    # ── Retornos ANBIMA (histórico completo para cálculo de retornos) ──────────
+    ("historico_anbima",     dados_historico_anbima,   ["Data_Posicao"]),
+    ("cdi",                  df_cdi,                   ["Data_Posicao"]),
 ]
 
 
@@ -415,12 +434,29 @@ def _normalizar_datas(df: pd.DataFrame, cols: list) -> pd.DataFrame:
     return df
 
 
+def _sanitizar_tipos(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Converte colunas object com tipos mistos (str + numérico) para string pura.
+    O PyArrow falha ao tentar inferir double em colunas que misturam número e texto
+    (ex: Prazo_conversao com 'Sem Informação Anbima' junto a valores float).
+    """
+    df = df.copy()
+    for col in df.select_dtypes(include="object").columns:
+        # Se houver qualquer valor string não-nulo na coluna, força tudo para str
+        tem_string = df[col].dropna().apply(lambda x: isinstance(x, str)).any()
+        if tem_string:
+            # Preserva NaN como None para o Parquet registrar como nulo
+            df[col] = df[col].where(df[col].isna(), df[col].astype(str))
+    return df
+
+
 print("\nExportando Parquets...")
 
 for nome, df_exp, cols_data in EXPORTS:
     # Parquet (leitura pelo Streamlit)
     parquet_path = os.path.join(OUTPUT_DIR, f"{nome}.parquet")
     df_parquet = _normalizar_datas(df_exp, cols_data)
+    df_parquet = _sanitizar_tipos(df_parquet)
     df_parquet.to_parquet(parquet_path, index=False, compression="snappy", engine="pyarrow")
     size_mb = os.path.getsize(parquet_path) / 1_048_576
     print(f"  Parquet : {nome}.parquet  ({size_mb:.1f} MB)")
