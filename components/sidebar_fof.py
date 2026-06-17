@@ -66,7 +66,14 @@ def render_sidebar_fof(df_pivot: pl.LazyFrame, df_detail: pl.LazyFrame) -> dict:
                     .unique().collect().get_column("Data_Posicao").to_list())
         meses = sorted([pd.Period(m, freq="M") for m in meses_dt], reverse=True)
         mes_options = [str(m) for m in meses]
-        mes_str = st.selectbox("Mês de Posição", mes_options, key="fof_mes")
+        
+        idx_mes = 0
+        mes_ss = st.session_state.get("fof_mes_str")
+        if mes_ss and mes_ss in mes_options:
+            idx_mes = mes_options.index(mes_ss)
+
+        mes_str = st.selectbox("Mês de Posição", mes_options, index=idx_mes, key="fof_mes")
+        st.session_state["fof_mes_str"] = mes_str
 
         # ── Fundo — selectbox único com busca nativa ────────────────────────
         # O Streamlit exibe os nomes abreviados (format_func) mas retorna o
@@ -83,8 +90,12 @@ def render_sidebar_fof(df_pivot: pl.LazyFrame, df_detail: pl.LazyFrame) -> dict:
             ).select("Nome_Fundo_CVM").drop_nulls().unique().collect().get_column("Nome_Fundo_CVM").to_list()
         )
 
-        # Índice padrão: Solis Capital Core (ou 0 se não encontrar)
-        idx_padrao = _find_default_index(fundos, _FUNDO_PADRAO)
+        fundo_ss = st.session_state.get("fof_fundo_nome")
+        if fundo_ss and fundo_ss in fundos:
+            idx_padrao = fundos.index(fundo_ss)
+        else:
+            # Índice padrão: Solis Capital Core (ou 0 se não encontrar)
+            idx_padrao = _find_default_index(fundos, _FUNDO_PADRAO)
 
         fundo_str = st.selectbox(
             "Fundo",

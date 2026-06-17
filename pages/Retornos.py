@@ -273,27 +273,26 @@ with st.sidebar:
     st.markdown("---")
 
     # ── Peers: herda da aba de Peers ou seleção manual ───────────────────────
-    peers_nome_options = [
-        p for p in fundos_disponiveis if p != fundo_alvo_sel
-    ]
-
-    # Pré-seleciona peers vindos da aba de Peers (session_state)
-    peers_default = []
     if peers_filtrados:
-        peers_default = [
+        peers_nome_options = [
             p["nome"] for p in peers_filtrados
-            if p.get("nome") in peers_nome_options
-        ][:5]
+            if p.get("nome") != fundo_alvo_sel and p.get("nome") in fundos_disponiveis
+        ]
+        peers_default = peers_nome_options[:5]
+    else:
+        peers_nome_options = [
+            p for p in fundos_disponiveis if p != fundo_alvo_sel
+        ]
+        peers_default = []
 
     peers_sel_nomes = st.multiselect(
         "Peers para comparar",
         options=peers_nome_options,
         default=peers_default,
-        max_selections=5,
+        #max_selections=5,
         format_func=shorten,
         key="ret_peers",
-        help="Herdados automaticamente da aba 'Análise de Peers'. "
-             "Você pode adicionar ou remover peers aqui.",
+        help="Você pode adicionar ou remover peers aqui.",
     )
 
     # Mapeia nomes → CNPJs
@@ -312,7 +311,7 @@ with st.sidebar:
     hoje = pd.Timestamp.today().normalize()
     data_inicio_input = st.date_input(
         "Data início",
-        value=(hoje - pd.DateOffset(years=3)).date(),
+        value=pd.Timestamp('2026-01-01'),
         key="ret_dt_inicio",
     )
     data_fim_input = st.date_input(
@@ -461,7 +460,7 @@ if not df_idx.empty:
         ["__CDI__", cnpj_alvo] + list(cnpjs_peers)
     ))
 
-    cdi_idx = df_idx_viz[df_idx_viz["ID_CNPJ_Fundo"] == "__CDI__"].set_index("Data_Posicao")["Cota_Indexada"]
+    cdi_idx = df_idx_viz[df_idx_viz["ID_CNPJ_Fundo"] == "__CDI__"].drop_duplicates("Data_Posicao").set_index("Data_Posicao")["Cota_Indexada"]
 
     # Define y_title e y_tickfmt antes do loop (evita NameError quando CDI é o primeiro)
     if modo_cota == "% do CDI":
@@ -634,69 +633,61 @@ if not df_mensal.empty:
     df_h["Mes_str"] = df_h["Mes"].astype(str)
     df_h = df_h.sort_values("Mes")
 
-    def _build_heatmap(df_h: pd.DataFrame, val_col: str, title: str, fmt: str, colorscale) -> go.Figure:
-        pivot = df_h.pivot_table(
-            index="Fundo", columns="Mes_str", values=val_col, aggfunc="first"
-        )
-        # Ordena: alvo no topo
+    def _build_grouped_bar(df_h: pd.DataFrame, val_col: str, title: str, is_pct_cdi: bool = False) -> go.Figure:
+        fig = go.Figure()
+        
         fundo_alvo_curto = nome_map.get(cnpj_alvo, cnpj_alvo)
-        order = [fundo_alvo_curto] + [f for f in pivot.index if f != fundo_alvo_curto]
-        pivot = pivot.reindex([f for f in order if f in pivot.index])
-
-        z_vals  = pivot.values
-        def _fmt_z(v):
-            try:
-                return "" if np.isnan(float(v)) else f"{float(v) * 100:.2f}%"
-            except Exception:
-                return ""
-        text_vals = np.vectorize(_fmt_z)(z_vals)
-
-        fig = go.Figure(go.Heatmap(
-            z=z_vals,
-            x=pivot.columns.tolist(),
-            y=pivot.index.tolist(),
-            colorscale=colorscale,
-            zmid=0,
-            text=text_vals,
-            texttemplate="%{text}",
-            textfont=dict(size=9, color=PALETTE["text_hi"]),
-            colorbar=dict(thickness=10, tickformat=fmt, tickfont=dict(size=9)),
-            hovertemplate="<b>%{y}</b><br>%{x}<br>Valor: %{z:.4f}<extra></extra>",
-        ))
-        n_fundos = len(pivot.index)
-        n_meses  = len(pivot.columns)
-        h = max(180, n_fundos * 48 + 60)
+        # Identificar fundos únicos e ordenar (alvo primeiro)
+        fundos = [fundo_alvo_curto] + [f for f in df_h["Fundo"].unique() if f != fundo_alvo_curto]
+        
+        for i, f in enumerate(fundos):
+            df_f = df_h[df_h["Fundo"] == f].sort_values("Mes")
+            if df_f.empty: continue
+            
+            y_vals = df_f[val_col].fillna(0) * 100
+            
+            if not is_pct_cdi:
+                text_fmt = [f"{v:+.2f}%" for v in y_vals]
+                hovertemplate = "<b>%{x}</b><br>Fundo: <b>%{y:.2f}%</b><extra></extra>"
+            else:
+                text_fmt = [f"{v:.0f}%" for v in y_vals]
+                hovertemplate = "<b>%{x}</b><br>Fundo: <b>%{y:.1f}% do CDI</b><extra></extra>"
+            
+            is_alvo = f == fundo_alvo_curto
+            cor = _COR_ALVO if is_alvo else _CORES_PEERS[(i - 1) % len(_CORES_PEERS)]
+            
+            fig.add_trace(go.Bar(
+                x=df_f["Mes_str"].tolist(),
+                y=y_vals.tolist(),
+                name=f,
+                marker_color=cor,
+                text=text_fmt,
+                textposition="outside",
+                textfont=dict(size=8, color=PALETTE["text"]),
+                hovertemplate=hovertemplate,
+            ))
+            
         fig.update_layout(
             **_CHART,
-            height=h,
-            margin=dict(l=0, r=10, t=20, b=10),
+            barmode="group",
+            height=400,
+            legend=dict(**_LEGEND, orientation="h", y=1.04, x=0, yanchor="bottom"),
+            margin=dict(l=0, r=20, t=30, b=40),
         )
-        fig.update_xaxes(
-            tickangle=-45,
-            tickfont=dict(size=9, color=PALETTE["text"]),
-            nticks=min(n_meses, 24),
-        )
+        fig.update_xaxes(tickangle=-45, tickfont=dict(size=9))
+        if not is_pct_cdi:
+            fig.update_yaxes(title_text=title, ticksuffix="%", zeroline=True, zerolinecolor="rgba(255,255,255,0.15)")
+        else:
+            fig.update_yaxes(title_text=title, ticksuffix="", zeroline=True, zerolinecolor="rgba(255,255,255,0.15)")
+            
         return fig
 
-    _cs_ret = [
-        [0.0,  "#EF4444"],
-        [0.45, PALETTE["bg_card"]],
-        [0.55, PALETTE["bg_card"]],
-        [1.0,  PALETTE["amber"]],
-    ]
-    _cs_cdi = [
-        [0.0,  "#EF4444"],
-        [0.45, PALETTE["bg_card"]],
-        [0.55, PALETTE["bg_card"]],
-        [1.0,  PALETTE["green"]],
-    ]
-
     with tab_heat_abs:
-        fig_h_abs = _build_heatmap(df_h, "Ret_FD_am", "Retorno Mensal (%)", ".1%", _cs_ret)
+        fig_h_abs = _build_grouped_bar(df_h, "Ret_FD_am", "Retorno Mensal (%)", is_pct_cdi=False)
         st.plotly_chart(fig_h_abs, use_container_width=True)
 
     with tab_heat_cdi:
-        fig_h_cdi = _build_heatmap(df_h, "Ret_FD_DI_pct_am", "% CDI Mensal", ".2f", _cs_cdi)
+        fig_h_cdi = _build_grouped_bar(df_h, "Ret_FD_DI_pct_am", "% CDI Mensal", is_pct_cdi=True)
         st.plotly_chart(fig_h_cdi, use_container_width=True)
 
     with tab_bar_mensal:

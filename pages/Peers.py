@@ -329,7 +329,7 @@ st.markdown(f"""
 tab_lista, tab_scatter, tab_ranking, tab_comp = st.tabs([
     "Lista de Peers",
     "Dispersão",
-    "Ranking FIDC",
+    "Ranking Concentração em FIDC",
     "Comparativo de Carteiras",
 ])
 
