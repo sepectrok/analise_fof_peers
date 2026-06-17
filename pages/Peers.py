@@ -347,14 +347,33 @@ with tab_lista:
         rename_map = {col: label for col, label in ATRIBS_ANALISADO if col in tbl.columns}
         tbl = tbl.rename(columns=rename_map)
 
+        def fmt_br_currency(v):
+            if pd.isna(v): return "—"
+            s = f"{v:,.0f}".replace(",", "X").replace(".", ",").replace("X", ".")
+            return f"R$ {s}"
+            
+        def fmt_br_pct(v, plus=False):
+            if pd.isna(v): return "—"
+            s = f"{v*100:,.1f}".replace(".", ",")
+            return f"+{s}%" if (plus and v > 0) else f"{s}%"
+
+        tbl_disp = tbl.copy()
+        if "Pct_FIDC" in tbl_disp.columns:
+            tbl_disp["Pct_FIDC"] = tbl_disp["Pct_FIDC"].apply(lambda x: fmt_br_pct(x, False))
+        if "Δ FIDC vs Alvo" in tbl_disp.columns:
+            tbl_disp["Δ FIDC vs Alvo"] = tbl_disp["Δ FIDC vs Alvo"].apply(lambda x: fmt_br_pct(x, True))
+        for c in ["PL_Est_Cap", "PL_FIDC"]:
+            if c in tbl_disp.columns:
+                tbl_disp[c] = tbl_disp[c].apply(fmt_br_currency)
+
         col_cfg = {
             "Nome_Fundo_CVM":    st.column_config.TextColumn("Fundo"),
-            "Pct_FIDC":          st.column_config.NumberColumn("% FIDC",       format="%.1f%%"),
-            "Δ FIDC vs Alvo":    st.column_config.NumberColumn("Δ vs Alvo",    format="%+.1f%%"),
-            "PL_Est_Cap":        st.column_config.NumberColumn("PL (R$)",      format="R$ %.0f"),
-            "PL_FIDC":           st.column_config.NumberColumn("PL FIDC (R$)", format="R$ %.0f"),
+            "Pct_FIDC":          st.column_config.TextColumn("% FIDC"),
+            "Δ FIDC vs Alvo":    st.column_config.TextColumn("Δ vs Alvo"),
+            "PL_Est_Cap":        st.column_config.TextColumn("PL (R$)"),
+            "PL_FIDC":           st.column_config.TextColumn("PL FIDC (R$)"),
         }
-        st.dataframe(tbl, hide_index=True, use_container_width=True, column_config=col_cfg)
+        st.dataframe(tbl_disp, hide_index=True, use_container_width=True, column_config=col_cfg)
 
         csv = tbl.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
         st.download_button(

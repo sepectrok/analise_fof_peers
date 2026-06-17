@@ -473,12 +473,20 @@ with tab_carteira:
 
         st.caption(f"{len(df_show):,} linhas")
 
-        col_cfg = {c: st.column_config.NumberColumn(c, format="R$ %.4f")
-                   for c in ("Valor_Presente", "PL", "PU_Teorico") if c in df_show.columns}
-        if "Quantidade_Posicao" in df_show.columns:
-            col_cfg["Quantidade_Posicao"] = st.column_config.NumberColumn("Quantidade", format="%.4f")
+        def fmt_br(v, is_currency=True, decimals=4):
+            if pd.isna(v): return "—"
+            s = f"{v:,.{decimals}f}".replace(",", "X").replace(".", ",").replace("X", ".")
+            return f"R$ {s}" if is_currency else s
 
-        st.dataframe(df_show, hide_index=True, use_container_width=True, column_config=col_cfg)
+        df_disp = df_show.copy()
+        for c in ("Valor_Presente", "PL", "PU_Teorico"):
+            if c in df_disp.columns:
+                df_disp[c] = df_disp[c].apply(lambda x: fmt_br(x, True, 4))
+        
+        if "Quantidade_Posicao" in df_disp.columns:
+            df_disp["Quantidade_Posicao"] = df_disp["Quantidade_Posicao"].apply(lambda x: fmt_br(x, False, 4))
+
+        st.dataframe(df_disp, hide_index=True, use_container_width=True)
 
         csv = df_show.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
         st.download_button(
