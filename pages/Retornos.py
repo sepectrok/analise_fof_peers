@@ -278,7 +278,7 @@ with st.sidebar:
             p["nome"] for p in peers_filtrados
             if p.get("nome") != fundo_alvo_sel and p.get("nome") in fundos_disponiveis
         ]
-        peers_default = peers_nome_options[:5]
+        peers_default = peers_nome_options[:3]
     else:
         peers_nome_options = [
             p for p in fundos_disponiveis if p != fundo_alvo_sel
@@ -289,7 +289,7 @@ with st.sidebar:
         "Peers para comparar",
         options=peers_nome_options,
         default=peers_default,
-        #max_selections=5,
+        max_selections=3,
         format_func=shorten,
         key="ret_peers",
         help="Você pode adicionar ou remover peers aqui.",
@@ -677,6 +677,19 @@ if not df_mensal.empty:
         fig.update_xaxes(tickangle=-45, tickfont=dict(size=9))
         if not is_pct_cdi:
             fig.update_yaxes(title_text=title, ticksuffix="%", zeroline=True, zerolinecolor="rgba(255,255,255,0.15)")
+            
+            # Adicionar linha do CDI
+            df_cdi = df_h[["Mes", "Mes_str", "Ret_DI_am"]].drop_duplicates("Mes").sort_values("Mes")
+            y_cdi = df_cdi["Ret_DI_am"].fillna(0) * 100
+            fig.add_trace(go.Scatter(
+                x=df_cdi["Mes_str"].tolist(),
+                y=y_cdi.tolist(),
+                name="CDI",
+                mode="lines+markers",
+                line=dict(color=_COR_CDI, width=1.8, dash="dot"),
+                marker=dict(size=4, color=_COR_CDI),
+                hovertemplate="<b>%{x}</b><br>CDI: <b>%{y:.2f}%</b><extra></extra>",
+            ))
         else:
             fig.update_yaxes(title_text=title, ticksuffix="", zeroline=True, zerolinecolor="rgba(255,255,255,0.15)")
             
@@ -1012,13 +1025,14 @@ if not df_risco.empty:
             st.info("Sem métricas de risco disponíveis.")
         else:
             if len(cnpjs_peers) > 0 and len(df_r) > 1:
-                st.markdown('<div class="section-label">Dispersão Risco x Retorno (12M)</div>',
+                st.markdown('<div class="section-label">Dispersão Risco x Retorno (Anualizado no Período)</div>',
                             unsafe_allow_html=True)
                 
-                df_sc = df_r[["Fundo", "Vol_Anual", "Ret_FD_12M"]].copy()
-                df_sc = df_sc.dropna(subset=["Vol_Anual", "Ret_FD_12M"])
+                df_sc = df_r.merge(df_acc[["ID_CNPJ_Fundo", "Ret_FD_Total_aa"]], on="ID_CNPJ_Fundo", how="left")
+                df_sc = df_sc[["Fundo", "Vol_Anual", "Ret_FD_Total_aa"]].copy()
+                df_sc = df_sc.dropna(subset=["Vol_Anual", "Ret_FD_Total_aa"])
                 df_sc["Vol_pct"] = df_sc["Vol_Anual"] * 100
-                df_sc["Ret_pct"] = df_sc["Ret_FD_12M"] * 100
+                df_sc["Ret_pct"] = df_sc["Ret_FD_Total_aa"] * 100
                 df_sc["Nome_Curto"] = df_sc["Fundo"].map(shorten)
 
                 # Mapa de cores: fundo alvo com _COR_ALVO, peers com _CORES_PEERS
@@ -1037,7 +1051,7 @@ if not df_risco.empty:
                     color_discrete_map=color_map,
                     size_max=12,
                     hover_name="Nome_Curto",
-                    labels={"Vol_pct": "Volatilidade Anual (%)", "Ret_pct": "Retorno 12M (%)", "Nome_Curto": "Fundo"},
+                    labels={"Vol_pct": "Volatilidade Anual (%)", "Ret_pct": "Retorno Anualizado (%)", "Nome_Curto": "Fundo"},
                 )
                 fig_sc.update_traces(
                     marker=dict(size=12, line=dict(width=1, color="rgba(255,255,255,0.4)")),
