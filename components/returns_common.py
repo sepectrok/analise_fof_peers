@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import polars as pl
 import streamlit as st
 
 from components.charts import PALETTE
@@ -20,9 +21,11 @@ __all__ = [
     "fmt_pct", "fmt_pct_pos", "fmt_x", "fmt_num",
     "kpi_card",
     "CHART_LAYOUT", "LEGEND_LAYOUT", "COR_ALVO", "COR_CDI", "CORES_PEERS",
-    "load_historico", "load_cdi", "load_peers_carteira",
+    "load_max_dates", "load_historico_cnpjs", "load_cdi", "load_peers_carteira",
     "rebase_cota_indexada",
 ]
+
+_HISTORICO_COLS = ["ID_CNPJ_Fundo", "Codigo_Subclasse", "Data_Posicao", "PU_Cota", "PL_Total"]
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TEMA DE GRÁFICO (Plotly)
@@ -125,9 +128,51 @@ def kpi_card(label: str, value: str, delta: str = "",
 # ─────────────────────────────────────────────────────────────────────────────
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def load_historico() -> pd.DataFrame:
+def load_max_dates() -> pd.Series:
+    """
+    Última data disponível por fundo (índice = ID_CNPJ_Fundo).
+
+    O parquet `historico_anbima` tem ~17M linhas / ~560MB (histórico completo,
+    sem filtro de data — necessário para 12M/24M/YTD). Carregar tudo em pandas
+    só para descobrir "quais fundos têm histórico e até quando" já consumiu
+    ~2,5GB de RAM sozinho, estourando o limite do Streamlit Community Cloud.
+    Aqui filtramos para 2 colunas e agregamos (max) ANTES do collect(), então
+    só o resultado (1 linha por fundo) é materializado em pandas.
+    """
+    # Esta é a única consulta que ainda varre as ~17M linhas inteiras (para achar
+    # o max por fundo); engine="streaming" processa em lotes e reduz o pico de
+    # RAM observado em ~2,5x (~1,6GB → ~620MB) em teste com a base completa.
     lf = load_parquet("historico_anbima")
-    df = lf.select(["ID_CNPJ_Fundo", "Codigo_Subclasse", "Data_Posicao", "PU_Cota", "PL_Total"]).collect().to_pandas()
+    df = (
+        lf.select(["ID_CNPJ_Fundo", "Data_Posicao"])
+          .group_by("ID_CNPJ_Fundo")
+          .agg(pl.col("Data_Posicao").max())
+          .collect(engine="streaming")
+          .to_pandas()
+    )
+    df["Data_Posicao"] = pd.to_datetime(df["Data_Posicao"], errors="coerce")
+    return df.set_index("ID_CNPJ_Fundo")["Data_Posicao"]
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_historico_cnpjs(cnpjs: tuple[str, ...]) -> pd.DataFrame:
+    """
+    Carrega o histórico ANBIMA apenas para os CNPJs informados.
+
+    O filtro `is_in(cnpjs)` é aplicado no plano lazy do Polars ANTES do
+    `.collect()` (predicate pushdown), então apenas as linhas dos fundos
+    pedidos (tipicamente o fundo alvo + até 3 peers) chegam a virar pandas —
+    de ~17M linhas / ~2,5GB para tipicamente algumas milhares de linhas /
+    poucos MB. `cnpjs` precisa ser uma tupla (hashável) para o cache do
+    Streamlit funcionar corretamente.
+    """
+    lf = load_parquet("historico_anbima")
+    df = (
+        lf.select(_HISTORICO_COLS)
+          .filter(pl.col("ID_CNPJ_Fundo").is_in(list(cnpjs)))
+          .collect()
+          .to_pandas()
+    )
     df["Data_Posicao"] = pd.to_datetime(df["Data_Posicao"], errors="coerce")
     df["PU_Cota"]      = pd.to_numeric(df["PU_Cota"],      errors="coerce")
     df["PL_Total"]     = pd.to_numeric(df["PL_Total"],     errors="coerce")

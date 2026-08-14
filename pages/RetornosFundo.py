@@ -17,7 +17,9 @@ from components.returns_common import (
     kpi_card as _kpi_card,
     CHART_LAYOUT as _CHART, LEGEND_LAYOUT as _LEGEND,
     COR_ALVO as _COR_ALVO, COR_CDI as _COR_CDI,
-    load_historico as _load_historico, load_cdi as _load_cdi,
+    load_max_dates as _load_max_dates,
+    load_historico_cnpjs as _load_historico_cnpjs,
+    load_cdi as _load_cdi,
     load_peers_carteira as _load_peers_carteira,
     rebase_cota_indexada,
 )
@@ -45,17 +47,18 @@ def _calcular_solo(
     HISTÓRICO COMPLETO disponível do fundo até data_fim — veja a mesma nota
     em pages/Retornos.py::_calcular_tudo.
     """
-    df_hist = _load_historico()
+    # Carrega histórico já filtrado para o fundo pedido — o filtro por CNPJ é
+    # empurrado para o Polars ANTES do collect(), então não materializamos as
+    # ~17M linhas / ~2,5GB da base ANBIMA inteira em pandas (isso estava
+    # causando estouro de memória no Streamlit Community Cloud).
+    df_hist = _load_historico_cnpjs((cnpj_alvo,))
     df_cdi  = _load_cdi()
 
     data_inicio = pd.to_datetime(data_inicio_str)
     data_fim    = pd.to_datetime(data_fim_str)
 
     # ── Histórico completo (12M/24M/YTD/Total + métricas de risco) ──────────
-    df_hist_completo = df_hist[
-        (df_hist["ID_CNPJ_Fundo"] == cnpj_alvo) &
-        (df_hist["Data_Posicao"] <= data_fim)
-    ].copy()
+    df_hist_completo = df_hist[df_hist["Data_Posicao"] <= data_fim].copy()
     df_ret_completo = calcular_retorno_diario(df_hist_completo, df_cdi, cnpjs=[cnpj_alvo])
 
     df_acc   = calcular_acumulados(df_ret_completo)     if not df_ret_completo.empty else pd.DataFrame()
@@ -64,7 +67,6 @@ def _calcular_solo(
     # ── Período selecionado (cota indexada, retornos mensais) ───────────────
     data_inicio_ext = data_inicio - pd.Timedelta(days=5)
     df_hist_ext = df_hist[
-        (df_hist["ID_CNPJ_Fundo"] == cnpj_alvo) &
         (df_hist["Data_Posicao"] >= data_inicio_ext) &
         (df_hist["Data_Posicao"] <= data_fim)
     ].copy()
@@ -112,8 +114,7 @@ st.markdown("""
 with st.spinner("Carregando base histórica ANBIMA…"):
     try:
         df_peers_carteira = _load_peers_carteira()
-        df_hist_base = _load_historico()
-        max_dates = df_hist_base.groupby("ID_CNPJ_Fundo")["Data_Posicao"].max()
+        max_dates = _load_max_dates()
         cnpjs_com_hist = set(max_dates.index)
         dados_ok = True
     except Exception as e:
