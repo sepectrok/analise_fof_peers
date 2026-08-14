@@ -8,6 +8,7 @@ import polars as pl
 import os
 import base64
 from components.sidebar import load_css, _get_logo_html   # reutiliza CSS e logo
+from utils.formatters import shorten as _shorten_base
 
 # Nome padrão a pré-selecionar (busca parcial, case-insensitive)
 _FUNDO_PADRAO = "SOLIS CAPITAL CORE"
@@ -15,22 +16,7 @@ _FUNDO_PADRAO = "SOLIS CAPITAL CORE"
 
 def _shorten(name: str, max_len: int = 60) -> str:
     """Abrevia o nome do fundo para exibição no dropdown."""
-    if not isinstance(name, str):
-        return str(name)
-    s = name.upper()
-    for long, short in [
-        ("FUNDO DE INVESTIMENTO EM COTAS DE FUNDOS DE INVESTIMENTO", "FIC FI"),
-        ("FUNDO DE INVESTIMENTO EM COTAS DE FUNDO DE INVESTIMENTO", "FIC FI"),
-        ("FUNDO DE INVESTIMENTO EM COTAS", "FIC"),
-        ("FUNDO DE INVESTIMENTO", "FI"),
-        ("EM DIREITOS CREDITÓRIOS - RESPONSABILIDADE LIMITADA", "FIDC RL"),
-        ("EM DIREITOS CREDITÓRIOS", "FIDC"),
-        ("CRÉDITO PRIVADO", "CP"),
-        ("MULTIMERCADO", "MM"),
-        ("RENDA FIXA", "RF"),
-    ]:
-        s = s.replace(long.upper(), short)
-    return s[:max_len - 3] + "..." if len(s) > max_len else s
+    return _shorten_base(name, max_len=max_len)
 
 
 def _find_default_index(fundos: list[str], termo: str) -> int:

@@ -109,14 +109,23 @@ def calcular_acumulados(df_retorno: pd.DataFrame) -> pd.DataFrame:
     """
     Calcula retornos acumulados por período para cada fundo.
 
+    IMPORTANTE: `df_retorno` deve conter o HISTÓRICO COMPLETO disponível do
+    fundo (não apenas uma janela de exibição selecionada pelo usuário). As
+    janelas de 12M/24M/YTD são calculadas olhando para trás a partir da
+    última data de `df_retorno` — se o período recebido já estiver recortado
+    (por exemplo, para os últimos 3 meses), essas janelas silenciosamente
+    colapsam para "todo o período recebido", mascarando um retorno mais
+    curto como se fosse 12M/24M.
+
     Retorna um DataFrame com uma linha por (ID_CNPJ_Fundo, Codigo_Subclasse)
     contendo:
         - Ret_FD_12M, Ret_DI_12M, Ret_FD_DI_pct_12M
         - Ret_FD_24M, Ret_DI_24M, Ret_FD_DI_pct_24M
+        - Ret_FD_YTD, Ret_DI_YTD, Ret_FD_DI_pct_YTD
         - Ret_FD_Total, Ret_DI_Total, Ret_FD_DI_pct_Total
         - Ret_FD_Total_aa, Ret_DI_Total_aa
         - Dias_total, Data_Inicio, Data_Fim
-        - Ret_FD_DI_mais_12M, Ret_FD_DI_mais_24M, Ret_FD_DI_mais_Total
+        - Ret_FD_DI_mais_12M, Ret_FD_DI_mais_24M, Ret_FD_DI_mais_YTD, Ret_FD_DI_mais_Total
     """
     results = []
 
@@ -127,12 +136,14 @@ def calcular_acumulados(df_retorno: pd.DataFrame) -> pd.DataFrame:
         data_min = grp["Data_Posicao"].min()
         dias_total = len(grp)
 
-        # Janelas
+        # Janelas (sempre calculadas a partir de data_max, exigindo histórico completo)
         inicio_12m = data_max - pd.DateOffset(months=12)
         inicio_24m = data_max - pd.DateOffset(months=24)
+        inicio_ytd = pd.Timestamp(year=data_max.year, month=1, day=1)
 
         grp_12m = grp[grp["Data_Posicao"] >= inicio_12m]
         grp_24m = grp[grp["Data_Posicao"] >= inicio_24m]
+        grp_ytd = grp[grp["Data_Posicao"] >= inicio_ytd]
 
         def _acc(g, col_ftr):
             return _prod_ftr(g[col_ftr]) - 1
@@ -141,6 +152,8 @@ def calcular_acumulados(df_retorno: pd.DataFrame) -> pd.DataFrame:
         ret_di_12m  = _acc(grp_12m, "DI_ad_ftr")
         ret_fd_24m  = _acc(grp_24m, "COTA_ad_ftr")
         ret_di_24m  = _acc(grp_24m, "DI_ad_ftr")
+        ret_fd_ytd  = _acc(grp_ytd, "COTA_ad_ftr")
+        ret_di_ytd  = _acc(grp_ytd, "DI_ad_ftr")
         ret_fd_tot  = _acc(grp,     "COTA_ad_ftr")
         ret_di_tot  = _acc(grp,     "DI_ad_ftr")
 
@@ -186,6 +199,12 @@ def calcular_acumulados(df_retorno: pd.DataFrame) -> pd.DataFrame:
             "Ret_FD_DI_pct_24M":            _pct(ret_fd_24m, ret_di_24m),
             "Ret_FD_DI_mais_24M":           _mais(ret_fd_24m, ret_di_24m),
             "Dias_24M":                     len(grp_24m),
+            # YTD
+            "Ret_FD_YTD":                   ret_fd_ytd,
+            "Ret_DI_YTD":                   ret_di_ytd,
+            "Ret_FD_DI_pct_YTD":            _pct(ret_fd_ytd, ret_di_ytd),
+            "Ret_FD_DI_mais_YTD":           _mais(ret_fd_ytd, ret_di_ytd),
+            "Dias_YTD":                     len(grp_ytd),
             # Inception
             "Ret_FD_Total":                 ret_fd_tot,
             "Ret_DI_Total":                 ret_di_tot,
@@ -290,6 +309,14 @@ def calcular_metricas_risco(
 ) -> pd.DataFrame:
     """
     Calcula métricas de risco para cada (ID_CNPJ_Fundo, Codigo_Subclasse).
+
+    IMPORTANTE: assim como em `calcular_acumulados`, `df_retorno` deve conter
+    o histórico completo disponível do fundo — Vol_Anual, Sharpe, Tracking
+    Error, VaR e CVaR são definidos aqui como métricas de "todo o histórico
+    disponível", e Sharpe/Modigliani usam a janela de 12M olhando para trás
+    a partir da última data de `df_retorno`. Passar um `df_retorno` já
+    recortado por um período de exibição menor sub-representa a vol e mistura
+    janelas diferentes entre o numerador (12M) e o denominador (vol anual).
 
     Métricas calculadas (espelhando o bloco R):
         Vol_Diaria, Vol_Anual

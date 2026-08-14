@@ -11,8 +11,16 @@ import plotly.express as px
 import streamlit as st
 
 from components.sidebar import load_css
-from components.charts import PALETTE, _base_layout
-from utils.drive_loader import load_parquet
+from components.charts import PALETTE
+from components.returns_common import (
+    shorten, fmt_pct, fmt_pct_pos, fmt_x, fmt_num,
+    kpi_card as _kpi_card,
+    CHART_LAYOUT as _CHART, LEGEND_LAYOUT as _LEGEND,
+    COR_ALVO as _COR_ALVO, COR_CDI as _COR_CDI, CORES_PEERS as _CORES_PEERS,
+    load_historico as _load_historico, load_cdi as _load_cdi,
+    load_peers_carteira as _load_peers_carteira,
+    rebase_cota_indexada,
+)
 from utils.returns_calc import (
     calcular_retorno_diario,
     calcular_acumulados,
@@ -23,146 +31,6 @@ from utils.returns_calc import (
 
 load_css()
 
-# ─────────────────────────────────────────────────────────────────────────────
-# CONSTANTES DE LAYOUT
-# ─────────────────────────────────────────────────────────────────────────────
-_CHART = dict(
-    template="plotly_dark",
-    plot_bgcolor="rgba(0,0,0,0)",
-    paper_bgcolor="rgba(0,0,0,0)",
-    font=dict(family="Figtree, Inter, sans-serif", color=PALETTE["text"], size=12),
-    hoverlabel=dict(
-        bgcolor=PALETTE["bg_card"],
-        bordercolor=PALETTE["blue"],
-        font_color=PALETTE["text_hi"],
-    ),
-    xaxis=dict(
-        showgrid=True, gridcolor=PALETTE["grid"],
-        zeroline=False, color=PALETTE["text"],
-        tickfont=dict(size=11, color=PALETTE["text"]),
-    ),
-    yaxis=dict(
-        showgrid=True, gridcolor=PALETTE["grid"],
-        zeroline=False, color=PALETTE["text"],
-        tickfont=dict(size=11, color=PALETTE["text"]),
-    ),
-)
-_LEGEND = dict(bgcolor="rgba(0,0,0,0)", bordercolor="rgba(0,0,0,0)")
-
-# Cores para séries: fundo alvo sempre dourado, peers em azul/cinza
-_COR_ALVO = PALETTE["amber"]
-_COR_CDI  = "rgba(137,155,183,0.6)"
-_CORES_PEERS = [
-    PALETTE["blue"],
-    PALETTE["orange"],
-    PALETTE["green"],
-    PALETTE["blue_lt"],
-    "#9B59B6",
-    "#1ABC9C",
-]
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# HELPERS
-# ─────────────────────────────────────────────────────────────────────────────
-
-def shorten(name: str, max_len: int = 50) -> str:
-    if not isinstance(name, str):
-        return str(name)
-    s = name.upper()
-    for long, short in [
-        ("FUNDO DE INVESTIMENTO EM COTAS DE FUNDOS DE INVESTIMENTO", "FIC FI"),
-        ("FUNDO DE INVESTIMENTO EM COTAS DE FUNDO DE INVESTIMENTO",  "FIC FI"),
-        ("FUNDO DE INVESTIMENTO EM COTAS", "FIC"),
-        ("FUNDO DE INVESTIMENTO",          "FI"),
-        ("EM DIREITOS CREDITÓRIOS - RESPONSABILIDADE LIMITADA", "FIDC RL"),
-        ("EM DIREITOS CREDITÓRIOS", "FIDC"),
-        ("CRÉDITO PRIVADO", "CP"),
-        ("MULTIMERCADO",    "MM"),
-        ("RENDA FIXA",      "RF"),
-    ]:
-        s = s.replace(long.upper(), short)
-    return s[: max_len - 3] + "..." if len(s) > max_len else s
-
-
-def fmt_pct(v, digits=2):
-    if v is None or (isinstance(v, float) and np.isnan(v)):
-        return "—"
-    return f"{v * 100:+.{digits}f}%"
-
-
-def fmt_pct_pos(v, digits=2):
-    if v is None or (isinstance(v, float) and np.isnan(v)):
-        return "—"
-    return f"{v * 100:.{digits}f}%"
-
-
-def fmt_x(v, digits=2):
-    """Formata como múltiplo do CDI (ex: 1,23×)."""
-    if v is None or (isinstance(v, float) and np.isnan(v)):
-        return "—"
-    return f"{v:.{digits}f}×"
-
-
-def fmt_num(v, digits=2):
-    if v is None or (isinstance(v, float) and np.isnan(v)):
-        return "—"
-    return f"{v:.{digits}f}"
-
-
-def _kpi_card(label: str, value: str, delta: str = "", color: str = PALETTE["amber"]) -> str:
-    text_color = PALETTE["text"]
-    delta_html = (
-        f"<div style='font-size:0.72rem;color:{text_color};margin-top:2px'>{delta}</div>"
-        if delta else ""
-    )
-    text_col = PALETTE["text"]
-    return f"""
-    <div style="
-        background:rgba(26,58,82,0.55);
-        border:1px solid rgba(255,195,106,0.15);
-        border-radius:12px;
-        padding:16px 20px;
-        min-height:90px;
-    ">
-        <div style="font-size:0.68rem;text-transform:uppercase;letter-spacing:1px;
-                    color:{text_col};margin-bottom:6px">{label}</div>
-        <div style="font-size:1.55rem;font-weight:700;color:{color};
-                    font-family:Figtree,sans-serif;line-height:1.1">{value}</div>
-        {delta_html}
-    </div>"""
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# CARREGAMENTO DE DADOS (com cache)
-# ─────────────────────────────────────────────────────────────────────────────
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def _load_historico() -> pd.DataFrame:
-    lf = load_parquet("historico_anbima")
-    df = lf.select(["ID_CNPJ_Fundo", "Codigo_Subclasse", "Data_Posicao", "PU_Cota", "PL_Total"]).collect().to_pandas()
-    df["Data_Posicao"] = pd.to_datetime(df["Data_Posicao"], errors="coerce")
-    df["PU_Cota"]      = pd.to_numeric(df["PU_Cota"],      errors="coerce")
-    df["PL_Total"]     = pd.to_numeric(df["PL_Total"],     errors="coerce")
-    return df
-
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def _load_cdi() -> pd.DataFrame:
-    lf = load_parquet("cdi")
-    df = lf.collect().to_pandas()
-    df["Data_Posicao"] = pd.to_datetime(df["Data_Posicao"], errors="coerce")
-    for c in ("DI_aa", "DI_ad", "DI_aa_ftr", "DI_ad_ftr"):
-        if c in df.columns:
-            df[c] = pd.to_numeric(df[c], errors="coerce")
-    return df
-
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def _load_peers_carteira() -> pd.DataFrame:
-    lf = load_parquet("fundos_peers_carteira")
-    return lf.select(["ID_CNPJ_Fundo", "Nome_Fundo_CVM"]).unique().collect().to_pandas()
-
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def _calcular_tudo(
@@ -171,40 +39,68 @@ def _calcular_tudo(
     data_inicio_str: str,
     data_fim_str: str,
 ) -> dict:
-    """Executa todos os cálculos; usa cache por combinação de parâmetros."""
+    """
+    Executa todos os cálculos; usa cache por combinação de parâmetros.
+
+    12M/24M/YTD/Total e as métricas de risco (Vol, Sharpe, Tracking Error,
+    VaR, CVaR) são calculados sobre o HISTÓRICO COMPLETO disponível de cada
+    fundo até data_fim — essas janelas olham para trás a partir de data_fim,
+    independentemente da "Data início" escolhida na sidebar. Essa data serve
+    apenas para recortar o gráfico de cota indexada, a grade de retornos
+    mensais e a coluna de retorno "do período" da tabela comparativa.
+
+    Para o período selecionado, buscamos 5 dias de calendário extra antes de
+    data_inicio para garantir ao menos 1 dia útil anterior, permitindo que
+    calcular_retorno_diario compute COTA_ad_ftr = PU_t / PU_{t-1} corretamente
+    no primeiro dia solicitado.
+    """
     df_hist = _load_historico()
     df_cdi  = _load_cdi()
 
     cnpjs_todos = list({cnpj_alvo} | set(cnpjs_peers))
 
-    # Filtro de período
     data_inicio = pd.to_datetime(data_inicio_str)
     data_fim    = pd.to_datetime(data_fim_str)
 
-    # Retornos diários
-    df_ret = calcular_retorno_diario(df_hist, df_cdi, cnpjs=cnpjs_todos)
-    df_ret = df_ret[
-        (df_ret["Data_Posicao"] >= data_inicio) &
-        (df_ret["Data_Posicao"] <= data_fim)
+    # ── Histórico completo (12M/24M/YTD/Total + métricas de risco) ──────────
+    df_hist_completo = df_hist[
+        (df_hist["ID_CNPJ_Fundo"].isin(cnpjs_todos)) &
+        (df_hist["Data_Posicao"] <= data_fim)
+    ].copy()
+    df_ret_completo = calcular_retorno_diario(df_hist_completo, df_cdi, cnpjs=cnpjs_todos)
+
+    df_acc   = calcular_acumulados(df_ret_completo)   if not df_ret_completo.empty else pd.DataFrame()
+    df_risco = calcular_metricas_risco(df_ret_completo) if not df_ret_completo.empty else pd.DataFrame()
+
+    # ── Período selecionado (cota indexada, retornos mensais, tabela) ───────
+    data_inicio_ext = data_inicio - pd.Timedelta(days=5)
+    df_hist_ext = df_hist[
+        (df_hist["ID_CNPJ_Fundo"].isin(cnpjs_todos)) &
+        (df_hist["Data_Posicao"] >= data_inicio_ext) &
+        (df_hist["Data_Posicao"] <= data_fim)
+    ].copy()
+    df_ret_ext = calcular_retorno_diario(df_hist_ext, df_cdi, cnpjs=cnpjs_todos)
+    df_ret = df_ret_ext[
+        (df_ret_ext["Data_Posicao"] >= data_inicio) &
+        (df_ret_ext["Data_Posicao"] <= data_fim)
     ].copy()
 
-    if df_ret.empty:
+    if df_ret.empty and df_ret_completo.empty:
         return {}
 
-    df_acc     = calcular_acumulados(df_ret)
-    df_mensal  = calcular_retorno_mensal(df_ret)
-    df_idx     = calcular_cota_indexada(df_ret, df_cdi[
+    df_mensal = calcular_retorno_mensal(df_ret) if not df_ret.empty else pd.DataFrame()
+    df_idx    = calcular_cota_indexada(df_ret, df_cdi[
         (df_cdi["Data_Posicao"] >= data_inicio) &
         (df_cdi["Data_Posicao"] <= data_fim)
-    ])
-    df_risco   = calcular_metricas_risco(df_ret)
+    ]) if not df_ret.empty else pd.DataFrame()
 
     return {
-        "df_ret":    df_ret,
-        "df_acc":    df_acc,
-        "df_mensal": df_mensal,
-        "df_idx":    df_idx,
-        "df_risco":  df_risco,
+        "df_ret":          df_ret,
+        "df_ret_completo": df_ret_completo,
+        "df_acc":          df_acc,
+        "df_mensal":       df_mensal,
+        "df_idx":          df_idx,
+        "df_risco":        df_risco,
     }
 
 
@@ -235,9 +131,12 @@ st.markdown("""
 with st.spinner("Carregando base histórica ANBIMA…"):
     try:
         df_peers_carteira = _load_peers_carteira()
+        df_hist_base = _load_historico()
+        max_dates = df_hist_base.groupby("ID_CNPJ_Fundo")["Data_Posicao"].max()
+        cnpjs_com_hist = set(max_dates.index)
         dados_ok = True
     except Exception as e:
-        st.error(f"❌ Erro ao carregar dados:\n\n{e}")
+        st.error(f"Erro ao carregar dados:\n\n{e}")
         dados_ok = False
 
 if not dados_ok:
@@ -252,7 +151,17 @@ with st.sidebar:
                 unsafe_allow_html=True)
 
     # ── Fundo alvo ────────────────────────────────────────────────────────────
-    fundos_disponiveis = sorted(df_peers_carteira["Nome_Fundo_CVM"].dropna().unique().tolist())
+    #df_peers_sem_hist = df_peers_carteira[~df_peers_carteira["ID_CNPJ_Fundo"].isin(cnpjs_com_hist)]
+    #fundos_sem_hist = sorted(df_peers_sem_hist["Nome_Fundo_CVM"].dropna().unique().tolist())
+    #
+    #if fundos_sem_hist:
+    #    with st.expander("Fundos sem Histórico ANBIMA", expanded=False):
+    #        st.markdown("Estes fundos não possuem dados históricos para análise:")
+    #        for f in fundos_sem_hist:
+    #            st.markdown(f"- {shorten(f)}")
+
+    df_peers_com_hist = df_peers_carteira[df_peers_carteira["ID_CNPJ_Fundo"].isin(cnpjs_com_hist)]
+    fundos_disponiveis = sorted(df_peers_com_hist["Nome_Fundo_CVM"].dropna().unique().tolist())
 
     idx_default = 0
     if fundo_alvo_ss and fundo_alvo_ss in fundos_disponiveis:
@@ -269,6 +178,14 @@ with st.sidebar:
     cnpj_alvo = df_peers_carteira.loc[
         df_peers_carteira["Nome_Fundo_CVM"] == fundo_alvo_sel, "ID_CNPJ_Fundo"
     ].iloc[0] if not df_peers_carteira.empty else None
+    max_date_alvo = max_dates.get(cnpj_alvo) if cnpj_alvo else None
+
+    # ── Reseta peers quando o fundo analisado muda ───────────────────────────
+    _fundo_prev = st.session_state.get("ret_fundo_alvo_prev", None)
+    if _fundo_prev != fundo_alvo_sel:
+        # Fundo mudou: limpa seleção de peers para evitar contaminação cruzada
+        st.session_state.pop("ret_peers", None)
+        st.session_state["ret_fundo_alvo_prev"] = fundo_alvo_sel
 
     st.markdown("---")
 
@@ -285,10 +202,18 @@ with st.sidebar:
         ]
         peers_default = []
 
+    # Garante que os defaults de peers anteriores não vazem para o novo fundo
+    _peers_key_val = st.session_state.get("ret_peers", None)
+    _peers_default_safe = [
+        p for p in (peers_default if _peers_key_val is None else _peers_key_val)
+        if p in peers_nome_options
+    ]
+
+    st.caption("Peers sem histórico ANBIMA foram descartados automaticamente.")
     peers_sel_nomes = st.multiselect(
         "Peers para comparar",
         options=peers_nome_options,
-        default=peers_default,
+        default=_peers_default_safe,
         max_selections=3,
         format_func=shorten,
         key="ret_peers",
@@ -306,6 +231,14 @@ with st.sidebar:
 
     st.markdown("---")
 
+    avisos_incompletos = []
+    for peer_n, peer_c in zip(peers_sel_nomes, cnpjs_peers):
+        md = max_dates.get(peer_c)
+        if pd.isna(md):
+            avisos_incompletos.append(f"- **{shorten(peer_n)}**: Sem histórico ANBIMA")
+        elif max_date_alvo is not None and pd.notna(max_date_alvo) and md < max_date_alvo:
+            avisos_incompletos.append(f"- **{shorten(peer_n)}**: Dados apenas até {md.strftime('%d/%m/%Y')} (alvo vai até {max_date_alvo.strftime('%d/%m/%Y')})")
+
     # ── Período de análise ────────────────────────────────────────────────────
     st.markdown("**Período de análise**")
     hoje = pd.Timestamp.today().normalize()
@@ -322,10 +255,6 @@ with st.sidebar:
 
     data_inicio_str = str(data_inicio_input)
     data_fim_str    = str(data_fim_input)
-
-    st.markdown("---")
-    calcular_btn = st.button("⚡ Calcular Retornos", use_container_width=True, type="primary")
-
 # ─────────────────────────────────────────────────────────────────────────────
 # CÁLCULOS PRINCIPAIS
 # ─────────────────────────────────────────────────────────────────────────────
@@ -335,14 +264,14 @@ if cnpj_alvo is None:
 
 # Dispara cálculo (botão ou mudança de parâmetros via session_state)
 chave_calc = (cnpj_alvo, cnpjs_peers, data_inicio_str, data_fim_str)
-if calcular_btn or "ret_resultado" not in st.session_state or st.session_state.get("ret_chave") != chave_calc:
+if "ret_resultado" not in st.session_state or st.session_state.get("ret_chave") != chave_calc:
     with st.spinner("Calculando retornos e métricas de risco…"):
         try:
             resultado = _calcular_tudo(cnpj_alvo, cnpjs_peers, data_inicio_str, data_fim_str)
             st.session_state["ret_resultado"] = resultado
             st.session_state["ret_chave"]     = chave_calc
         except Exception as e:
-            st.error(f"❌ Erro no cálculo:\n\n{e}")
+            st.error(f"Erro no cálculo:\n\n{e}")
             st.stop()
 
 resultado = st.session_state.get("ret_resultado", {})
@@ -370,6 +299,9 @@ for n in peers_sel_nomes:
         nome_map[row.iloc[0]["ID_CNPJ_Fundo"]] = shorten(n)
 
 
+if avisos_incompletos:
+    st.warning("**Aviso de Dados Incompletos:** Os seguintes fundos possuem base histórica defasada em relação ao fundo analisado. Seus retornos absolutos no mês mais recente aparecerão menores do que a realidade.\n\n" + "\n".join(avisos_incompletos))
+
 # ─────────────────────────────────────────────────────────────────────────────
 # SEÇÃO 1 — CARDS KPI
 # ─────────────────────────────────────────────────────────────────────────────
@@ -381,6 +313,8 @@ st.markdown(
 if not acc_alvo.empty:
     row = acc_alvo.iloc[0]
     kpis = [
+        ("Retorno YTD",    fmt_pct_pos(row.get("Ret_FD_YTD")),
+         f"CDI: {fmt_pct_pos(row.get('Ret_DI_YTD'))}"),
         ("Retorno 12M",    fmt_pct_pos(row.get("Ret_FD_12M")),
          f"CDI: {fmt_pct_pos(row.get('Ret_DI_12M'))}"),
         ("% CDI — 12M",    fmt_x(row.get("Ret_FD_DI_pct_12M")),
@@ -442,18 +376,8 @@ else:
     _data_corte = pd.to_datetime(data_inicio_str)
 
 if not df_idx.empty:
-    # Filtra pelo período e rebaseia cada série para 100 na data de corte
-    df_idx_viz = df_idx[df_idx["Data_Posicao"] >= _data_corte].copy()
-
-    # Re-normaliza cada série individualmente: o primeiro ponto vira 100
-    frames_rebased = []
-    for _cnpj, _grp in df_idx_viz.groupby("ID_CNPJ_Fundo"):
-        _grp = _grp.sort_values("Data_Posicao").copy()
-        _base_val = _grp["Cota_Indexada"].iloc[0]
-        if _base_val and _base_val != 0:
-            _grp["Cota_Indexada"] = _grp["Cota_Indexada"] / _base_val * 100.0
-        frames_rebased.append(_grp)
-    df_idx_viz = pd.concat(frames_rebased, ignore_index=True) if frames_rebased else df_idx_viz
+    # Re-normaliza cada série individualmente: tenta usar o dia anterior ao corte como base 100
+    df_idx_viz, teve_antes_map = rebase_cota_indexada(df_idx, _data_corte)
 
     # Ordem de exibição: CDI primeiro, depois alvo, depois peers
     cnpjs_plot = list(dict.fromkeys(
@@ -467,7 +391,7 @@ if not df_idx.empty:
         y_title   = "Retorno em % do CDI"
         y_tickfmt = ".0f"
     else:
-        y_title   = f"Cota (base 100 em {_data_corte.strftime('%d/%m/%Y')})"
+        y_title   = "Cota (Base 100)"
         y_tickfmt = ".1f"
 
     fig_idx = go.Figure()
@@ -483,15 +407,31 @@ if not df_idx.empty:
             cdi_alinhado = pd.Series(cdi_alinhado.values, index=serie["Data_Posicao"].values)
             cdi_alinhado = cdi_alinhado.interpolate(method="linear").ffill().bfill()
 
+            # Se o fundo tem histórico antes do corte, ambos (fundo e CDI) foram rebaseados para 100 no dia anterior ao corte.
+            # Logo, a base de comparação para o CDI é 100.0.
+            # Caso contrário, a base do CDI é o valor do CDI no primeiro ponto da série.
+            teve_antes = teve_antes_map.get(cnpj, False)
+            if teve_antes:
+                cdi_base_val = 100.0
+            else:
+                cdi_base_val = cdi_alinhado.values[0] if len(cdi_alinhado) > 0 else 100.0
+
             ret_fd = (serie["Cota_Indexada"].values / 100.0) - 1.0
-            ret_di = (cdi_alinhado.values / 100.0) - 1.0
+            if cdi_base_val and not pd.isna(cdi_base_val):
+                ret_di = (cdi_alinhado.values / cdi_base_val) - 1.0
+            else:
+                ret_di = (cdi_alinhado.values / 100.0) - 1.0
 
             with np.errstate(divide="ignore", invalid="ignore"):
                 pct_cdi = np.where(
                     np.abs(ret_di) < 1e-10,
-                    100.0,
+                    np.nan,
                     (ret_fd / ret_di) * 100.0,
                 )
+            
+            # Preenche NaNs (como no primeiro dia caso teve_antes seja False) com o valor do dia útil seguinte
+            pct_cdi = pd.Series(pct_cdi).bfill().ffill().fillna(100.0).values
+
             serie["Y_plot"] = pct_cdi
             hover_fmt = "<b>%{hovertext}</b><br>%{x|%d/%m/%Y}<br>%{y:.1f}% do CDI<extra></extra>"
         else:
@@ -549,6 +489,9 @@ if not df_acc.empty:
     )
 
     # ── Calcula retorno acumulado no período visualizado (Mês/Semestre/Ano) ──
+    # Usa sempre o histórico completo (df_ret_completo), não o período
+    # selecionado na sidebar — assim "Ano" sempre reflete 12 meses reais,
+    # mesmo que a "Data início" escolhida seja mais recente que isso.
     _lbl_periodo = {
         "Mês": "1M", "Semestre": "6M", "Ano": "12M", "Todo o período": "Período"
     }.get(periodo_viz, "Período")
@@ -559,7 +502,7 @@ if not df_acc.empty:
 
     def _acc_periodo(cnpj: str, data_corte: pd.Timestamp) -> tuple:
         """Retorna (ret_fd, ret_di, pct_cdi) acumulado desde data_corte até data_fim."""
-        df_r_ = resultado["df_ret"]
+        df_r_ = resultado["df_ret_completo"]
         grp = df_r_[
             (df_r_["ID_CNPJ_Fundo"] == cnpj) &
             (df_r_["Data_Posicao"] >= data_corte)
@@ -576,43 +519,31 @@ if not df_acc.empty:
     df_tbl[_col_cdi_periodo]   = df_tbl["ID_CNPJ_Fundo"].apply(lambda c: _acc_periodo(c, _data_corte)[1])
     df_tbl[_col_pct_cdi_periodo] = df_tbl["ID_CNPJ_Fundo"].apply(lambda c: _acc_periodo(c, _data_corte)[2])
 
+    # ── Formata para exibição em padrão BR (vírgula decimal) ────────────────
+    _lbl_periodo_col   = f"Ret {_lbl_periodo}"
+    _lbl_cdi_periodo    = f"CDI {_lbl_periodo}"
+    _lbl_pct_periodo    = f"% CDI {_lbl_periodo}"
+
+    df_show = pd.DataFrame({"Fundo": df_tbl["Fundo"]})
+    df_show[_lbl_periodo_col] = df_tbl[_col_periodo].apply(fmt_pct_pos)
+    df_show[_lbl_cdi_periodo]  = df_tbl[_col_cdi_periodo].apply(fmt_pct_pos)
+    df_show[_lbl_pct_periodo]  = df_tbl[_col_pct_cdi_periodo].apply(lambda v: fmt_pct_pos(v, digits=0))
+    df_show["YTD"]             = df_tbl["Ret_FD_YTD"].apply(fmt_pct_pos)
+    df_show["12M"]             = df_tbl["Ret_FD_12M"].apply(fmt_pct_pos)
+    df_show["% CDI 12M"]       = df_tbl["Ret_FD_DI_pct_12M"].apply(lambda v: fmt_pct_pos(v, digits=0))
+    df_show["CDI+ 12M"]        = df_tbl["Ret_FD_DI_mais_12M"].apply(lambda v: fmt_pct(v, digits=3))
+    df_show["24M"]             = df_tbl["Ret_FD_24M"].apply(fmt_pct_pos)
+    df_show["% CDI 24M"]       = df_tbl["Ret_FD_DI_pct_24M"].apply(lambda v: fmt_pct_pos(v, digits=0))
+    df_show["Desde o Início"]    = df_tbl["Ret_FD_Total"].apply(fmt_pct_pos)
+    df_show["Desde o Início aa"] = df_tbl["Ret_FD_Total_aa"].apply(fmt_pct_pos)
+    df_show["% CDI Início"]      = df_tbl["Ret_FD_DI_pct_Total"].apply(lambda v: fmt_pct_pos(v, digits=0))
+    df_show["Dias"]              = df_tbl["Dias_total"]
+
     col_cfg = {
-        "Fundo":                     st.column_config.TextColumn("Fundo", width="large"),
-        _col_periodo:                st.column_config.NumberColumn(f"Ret {_lbl_periodo}",      format="%.2f%%"),
-        _col_cdi_periodo:            st.column_config.NumberColumn(f"CDI {_lbl_periodo}",      format="%.2f%%"),
-        _col_pct_cdi_periodo:        st.column_config.NumberColumn(f"% CDI {_lbl_periodo}",    format="%.0f%%"),
-        "Ret_FD_12M":                st.column_config.NumberColumn("12M",          format="%.2f%%"),
-        "Ret_FD_DI_pct_12M":         st.column_config.NumberColumn("% CDI 12M",    format="%.0f%%"),
-        "Ret_FD_DI_mais_12M":        st.column_config.NumberColumn("CDI+ 12M",     format="%.3f%%"),
-        "Ret_FD_24M":                st.column_config.NumberColumn("24M",          format="%.2f%%"),
-        "Ret_FD_DI_pct_24M":         st.column_config.NumberColumn("% CDI 24M",    format="%.0f%%"),
-        "Ret_FD_Total":              st.column_config.NumberColumn("Desde o Início",     format="%.2f%%"),
-        "Ret_FD_Total_aa":           st.column_config.NumberColumn("Desde o Início aa",  format="%.2f%%"),
-        "Ret_FD_DI_pct_Total":       st.column_config.NumberColumn("% CDI Início", format="%.0f%%"),
-        "Dias_total":                st.column_config.NumberColumn("Dias",          format="%d"),
+        "Fundo": st.column_config.TextColumn("Fundo", width="large"),
+        "Dias":  st.column_config.NumberColumn("Dias", format="%d"),
     }
-
-    # Multiplica percentuais por 100 para exibição formatada
-    pct_cols = ["Ret_FD_12M", "Ret_DI_12M", "Ret_FD_DI_mais_12M",
-                "Ret_FD_24M", "Ret_DI_24M", "Ret_FD_DI_mais_24M",
-                "Ret_FD_Total", "Ret_DI_Total", "Ret_FD_Total_aa", "Ret_DI_Total_aa",
-                "Ret_FD_DI_pct_12M", "Ret_FD_DI_pct_24M", "Ret_FD_DI_pct_Total",
-                _col_periodo, _col_cdi_periodo, _col_pct_cdi_periodo]
-    df_show = df_tbl.copy()
-    for c in pct_cols:
-        if c in df_show.columns:
-            df_show[c] = df_show[c] * 100
-
-    # Colunas do período escolhido primeiro, depois as fixas
-    cols_show = [
-        "Fundo",
-        _col_periodo, _col_cdi_periodo, _col_pct_cdi_periodo,
-        "Ret_FD_12M", "Ret_FD_DI_pct_12M", "Ret_FD_DI_mais_12M",
-        "Ret_FD_24M", "Ret_FD_DI_pct_24M",
-        "Ret_FD_Total", "Ret_FD_Total_aa", "Ret_FD_DI_pct_Total", "Dias_total",
-    ]
-    cols_show = [c for c in cols_show if c in df_show.columns]
-    st.dataframe(df_show[cols_show], hide_index=True, use_container_width=True, column_config=col_cfg)
+    st.dataframe(df_show, hide_index=True, use_container_width=True, column_config=col_cfg)
 
 st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
 
@@ -892,7 +823,10 @@ if not df_risco.empty:
             border-left:3px solid var(--accent-warm); border-radius:4px; font-size:0.78rem;">
   📌 <b>Nota sobre dados:</b> Todos os cálculos utilizam a série de PU_Cota diária reportada à ANBIMA.
   O CDI de referência é o DI Over (CETIP), expresso como fator diário <b>DI_ad_ftr</b>.
-  O período base é definido pelo filtro de datas na sidebar.
+  YTD/12M/24M e as métricas de risco desta seção usam sempre o histórico completo
+  disponível do fundo até a data fim selecionada — o filtro de "Data início" da sidebar
+  afeta apenas o gráfico de cota indexada, a grade de retornos mensais e a coluna
+  "do período" da tabela comparativa.
 </div>
 
 </div>
@@ -925,42 +859,60 @@ if not df_risco.empty:
                 st.markdown('<div class="section-label">Histograma de Retornos Mensais</div>',
                             unsafe_allow_html=True)
 
+                # Calcula bin size adaptativo baseado no range real
+                _all_vals = df_mensal_alvo["FD_pct"].dropna()
+                _data_range = _all_vals.max() - _all_vals.min()
+                if _data_range < 0.1:
+                    # Dados muito concentrados: usa bins menores (ex: FIDCs com retorno estável)
+                    _bin_size = max(_data_range / 10, 0.01)
+                elif _data_range < 1.0:
+                    _bin_size = _data_range / 8
+                else:
+                    # Dados com boa dispersão: usa Sturges rule
+                    _n_bins = max(int(np.ceil(np.log2(len(_all_vals)) + 1)), 6)
+                    _bin_size = _data_range / _n_bins
+
                 df_pos = df_mensal_alvo[df_mensal_alvo["FD_pct"] >= 0]
                 df_neg = df_mensal_alvo[df_mensal_alvo["FD_pct"] < 0]
 
                 fig_hist = go.Figure()
-                if not df_pos.empty:
-                    fig_hist.add_trace(go.Histogram(
-                        x=df_pos["FD_pct"],
-                        name="Meses positivos",
-                        marker_color="rgba(16,185,129,0.65)",
-                        marker_line=dict(color="rgba(16,185,129,0.9)", width=0.8),
-                        xbins=dict(size=0.5),
-                    ))
-                if not df_neg.empty:
-                    fig_hist.add_trace(go.Histogram(
-                        x=df_neg["FD_pct"],
-                        name="Meses negativos",
-                        marker_color="rgba(239,68,68,0.65)",
-                        marker_line=dict(color="rgba(239,68,68,0.9)", width=0.8),
-                        xbins=dict(size=0.5),
-                    ))
+                # Traça histograma completo com coloração condicional via marcadores individuais
+                fig_hist.add_trace(go.Histogram(
+                    x=df_mensal_alvo["FD_pct"],
+                    name="Retornos Mensais",
+                    marker_color=[
+                        "rgba(16,185,129,0.72)" if v >= 0 else "rgba(239,68,68,0.72)"
+                        for v in df_mensal_alvo["FD_pct"]
+                    ],
+                    marker_line=dict(color="rgba(255,255,255,0.15)", width=0.6),
+                    xbins=dict(
+                        start=_all_vals.min() - _bin_size,
+                        end=_all_vals.max() + _bin_size,
+                        size=_bin_size,
+                    ),
+                    showlegend=False,
+                ))
 
-                for x_val, color_vl, label_vl in [
-                    (0,       "rgba(255,255,255,0.35)", "Zero"),
-                ]:
-                    fig_hist.add_vline(
-                        x=x_val, line_dash="dot", line_color=color_vl, line_width=1.5,
-                        annotation_text=label_vl,
-                        annotation_font=dict(color=color_vl, size=10),
-                        annotation_position="top right" if x_val >= 0 else "top left",
-                    )
+                # Linha vertical: Média do Fundo
+                fig_hist.add_vline(
+                    x=media_m, line_dash="dash", line_color=PALETTE["amber"], line_width=2,
+                    annotation_text=f"Média: {media_m:.3f}%",
+                    annotation_font=dict(color=PALETTE["amber"], size=10),
+                    annotation_position="top right",
+                )
+                # Linha vertical: Média CDI
+                fig_hist.add_vline(
+                    x=cdi_m, line_dash="dot", line_color=_COR_CDI, line_width=1.5,
+                    annotation_text=f"CDI Médio: {cdi_m:.3f}%",
+                    annotation_font=dict(color=_COR_CDI, size=10),
+                    annotation_position="top left",
+                )
 
                 fig_hist.update_layout(
                     **_CHART, barmode="overlay",
-                    height=340, margin=dict(l=0, r=20, t=30, b=10),
+                    height=340, margin=dict(l=0, r=20, t=45, b=10),
                     legend=dict(**_LEGEND, orientation="h", y=1.04, x=0, yanchor="bottom"),
-                    bargap=0.05,
+                    bargap=0.08,
                 )
                 fig_hist.update_xaxes(title_text="Retorno Mensal (%)", ticksuffix="%")
                 fig_hist.update_yaxes(title_text="Frequência (meses)")
@@ -969,13 +921,13 @@ if not df_risco.empty:
             with col_stats:
                 st.markdown('<div class="section-label">Resumo</div>', unsafe_allow_html=True)
                 for label, val, cor in [
-                    ("Total de Meses",   str(n_total),                               PALETTE["text"]),
-                    ("Meses Positivos",  f"{n_pos} ({n_pos/n_total*100:.0f}%)",     PALETTE["green"]),
-                    ("Acima do CDI",     f"{n_acima} ({n_acima/n_total*100:.0f}%)", PALETTE["amber"]),
-                    ("Média Mensal",     f"{media_m:+.2f}%",                         PALETTE["amber"]),
-                    ("Desvio-Padrão",    f"{std_m:.2f}%",                            PALETTE["blue_lt"]),
-                    ("Pior Mês",         f"{df_mensal_alvo['FD_pct'].min():+.2f}%", PALETTE["red"]),
-                    ("Melhor Mês",       f"{df_mensal_alvo['FD_pct'].max():+.2f}%", PALETTE["green"]),
+                    ("Total de Meses",   str(n_total),                                        PALETTE["text"]),
+                    ("Meses Positivos",  f"{n_pos} ({fmt_pct_pos(n_pos/n_total, 0)})",         PALETTE["green"]),
+                    ("Acima do CDI",     f"{n_acima} ({fmt_pct_pos(n_acima/n_total, 0)})",     PALETTE["amber"]),
+                    ("Média Mensal",     fmt_pct(media_m / 100),                               PALETTE["amber"]),
+                    ("Desvio-Padrão",    fmt_pct_pos(std_m / 100),                             PALETTE["blue_lt"]),
+                    ("Pior Mês",         fmt_pct(df_mensal_alvo['FD_pct'].min() / 100),        PALETTE["red"]),
+                    ("Melhor Mês",       fmt_pct(df_mensal_alvo['FD_pct'].max() / 100),        PALETTE["green"]),
                 ]:
                     st.markdown(_kpi_card(label, val, "", color=cor), unsafe_allow_html=True)
                     st.markdown("<div style='height:5px'></div>", unsafe_allow_html=True)
@@ -1062,43 +1014,24 @@ if not df_risco.empty:
                     legend=dict(**_LEGEND, title=""),
                     margin=dict(l=0, r=20, t=20, b=10)
                 )
+                fig_sc.update_xaxes(rangemode="normal", autorange=True)
+                fig_sc.update_yaxes(rangemode="normal", autorange=True)
                 st.plotly_chart(fig_sc, use_container_width=True)
             else:
                 st.info("É necessário selecionar peers para exibir o gráfico de dispersão Risco x Retorno.")
 
     # ── Tabela Completa ───────────────────────────────────────────────────────
     with tab_risco_tbl:
+        # ── CSV: mantém valores numéricos (ponto decimal) para compatibilidade ──
         pct_risco_cols = ["Vol_Diaria", "Vol_Anual", "Ret_FD_12M", "Ret_DI_12M",
                           "Tracking_Error", "VaR_1M", "VaR_12M", "CVaR_1M", "CVaR_12M",
                           "Pior_Mes", "Melhor_Mes", "Menor_Retorno_Dia", "Melhor_Retorno_Dia",
                           "Meses_Positivos_Pct", "Meses_Acima_CDI_Pct"]
-        df_r_show = df_r.copy()
+        df_r_csv = df_r.copy()
         for c in pct_risco_cols:
-            if c in df_r_show.columns:
-                df_r_show[c] = df_r_show[c] * 100
+            if c in df_r_csv.columns:
+                df_r_csv[c] = df_r_csv[c] * 100
 
-        col_cfg_r = {
-            "Fundo":                   st.column_config.TextColumn("Fundo", width="large"),
-            "Vol_Diaria":              st.column_config.NumberColumn("Vol. Diária (%)",     format="%.4f%%"),
-            "Vol_Anual":               st.column_config.NumberColumn("Vol. Anual (%)",      format="%.2f%%"),
-            "Sharpe":                  st.column_config.NumberColumn("Sharpe",              format="%.3f"),
-            "Modigliani":              st.column_config.NumberColumn("Modigliani (%)",      format="%.2f%%"),
-            "Information_Ratio":       st.column_config.NumberColumn("Info. Ratio",         format="%.3f"),
-            "Tracking_Error":          st.column_config.NumberColumn("Tracking Error (%)",  format="%.4f%%"),
-            "VaR_1M":                  st.column_config.NumberColumn("VaR 1M (%)",          format="%.2f%%"),
-            "VaR_12M":                 st.column_config.NumberColumn("VaR 12M (%)",         format="%.2f%%"),
-            "CVaR_1M":                 st.column_config.NumberColumn("CVaR 1M (%)",         format="%.2f%%"),
-            "CVaR_12M":                st.column_config.NumberColumn("CVaR 12M (%)",        format="%.2f%%"),
-            "Pior_Mes":                st.column_config.NumberColumn("Pior Mês (%)",        format="%.2f%%"),
-            "Pior_Mes_Data":           st.column_config.TextColumn("Pior Mês Data"),
-            "Melhor_Mes":              st.column_config.NumberColumn("Melhor Mês (%)",      format="%.2f%%"),
-            "Melhor_Mes_Data":         st.column_config.TextColumn("Melhor Mês Data"),
-            "Total_Meses":             st.column_config.NumberColumn("Total Meses",         format="%d"),
-            "Meses_Positivos_Qtd":     st.column_config.NumberColumn("Meses Pos.",          format="%d"),
-            "Meses_Positivos_Pct":     st.column_config.NumberColumn("Meses Pos. (%)",      format="%.1f%%"),
-            "Meses_Acima_CDI_Qtd":     st.column_config.NumberColumn("Acima CDI",           format="%d"),
-            "Meses_Acima_CDI_Pct":     st.column_config.NumberColumn("Acima CDI (%)",       format="%.1f%%"),
-        }
         cols_r = [
             "Fundo", "Vol_Diaria", "Vol_Anual", "Sharpe", "Information_Ratio",
             "Tracking_Error", "VaR_1M", "CVaR_1M", "VaR_12M", "CVaR_12M",
@@ -1106,11 +1039,35 @@ if not df_risco.empty:
             "Total_Meses", "Meses_Positivos_Qtd", "Meses_Positivos_Pct",
             "Meses_Acima_CDI_Qtd", "Meses_Acima_CDI_Pct"
         ]
-        cols_r = [c for c in cols_r if c in df_r_show.columns]
-        st.dataframe(df_r_show[cols_r], hide_index=True,
+        cols_r = [c for c in cols_r if c in df_r_csv.columns]
+
+        # ── Exibição em tela: padrão BR (vírgula decimal) ────────────────────
+        df_r_disp = pd.DataFrame({"Fundo": df_r["Fundo"]})
+        df_r_disp["Vol. Diária (%)"]    = df_r["Vol_Diaria"].apply(lambda v: fmt_pct_pos(v, digits=4))
+        df_r_disp["Vol. Anual (%)"]     = df_r["Vol_Anual"].apply(fmt_pct_pos)
+        df_r_disp["Sharpe"]             = df_r["Sharpe"].apply(fmt_num)
+        df_r_disp["Modigliani (%)"]     = df_r["Modigliani"].apply(fmt_pct_pos)
+        df_r_disp["Info. Ratio"]        = df_r["Information_Ratio"].apply(lambda v: fmt_num(v, digits=3))
+        df_r_disp["Tracking Error (%)"] = df_r["Tracking_Error"].apply(lambda v: fmt_pct_pos(v, digits=4))
+        df_r_disp["VaR 1M (%)"]         = df_r["VaR_1M"].apply(fmt_pct_pos)
+        df_r_disp["VaR 12M (%)"]        = df_r["VaR_12M"].apply(fmt_pct_pos)
+        df_r_disp["CVaR 1M (%)"]        = df_r["CVaR_1M"].apply(fmt_pct_pos)
+        df_r_disp["CVaR 12M (%)"]       = df_r["CVaR_12M"].apply(fmt_pct_pos)
+        df_r_disp["Pior Mês (%)"]       = df_r["Pior_Mes"].apply(fmt_pct_pos)
+        df_r_disp["Pior Mês Data"]      = df_r["Pior_Mes_Data"]
+        df_r_disp["Melhor Mês (%)"]     = df_r["Melhor_Mes"].apply(fmt_pct_pos)
+        df_r_disp["Melhor Mês Data"]    = df_r["Melhor_Mes_Data"]
+        df_r_disp["Total Meses"]        = df_r["Total_Meses"]
+        df_r_disp["Meses Pos."]         = df_r["Meses_Positivos_Qtd"]
+        df_r_disp["Meses Pos. (%)"]     = df_r["Meses_Positivos_Pct"].apply(lambda v: fmt_pct_pos(v, digits=1))
+        df_r_disp["Acima CDI"]          = df_r["Meses_Acima_CDI_Qtd"]
+        df_r_disp["Acima CDI (%)"]      = df_r["Meses_Acima_CDI_Pct"].apply(lambda v: fmt_pct_pos(v, digits=1))
+
+        col_cfg_r = {"Fundo": st.column_config.TextColumn("Fundo", width="large")}
+        st.dataframe(df_r_disp, hide_index=True,
                      use_container_width=True, column_config=col_cfg_r)
 
-        csv_r = df_r_show[cols_r].to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
+        csv_r = df_r_csv[cols_r].to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
         st.download_button(
             "⬇️ Baixar métricas de risco (.csv)", data=csv_r,
             file_name=f"risco_{fundo_alvo_sel[:30]}.csv",
@@ -1149,13 +1106,80 @@ if len(cnpjs_peers) > 0 and not df_acc.empty:
             "<b>%{y}</b><br>Retorno 12M: <b>%{x:.2f}%</b><extra></extra>"
         ),
     ))
-    _mx = df_rank["Ret_FD_12M"].max() if not df_rank.empty else 0.1
+    _mx = (df_rank["Ret_FD_12M"].max() * 100) if not df_rank.empty else 1.0
+    _mn = (df_rank["Ret_FD_12M"].min() * 100) if not df_rank.empty else 0.0
+    
+    padding = (_mx - _mn) * 0.1 if _mx != _mn else 1.0
+    range_x = [_mn - padding, _mx + padding]
+    
     fig_rank.update_layout(
         **_CHART,
         height=max(300, len(df_rank) * 42 + 60),
         margin=dict(l=0, r=80, t=10, b=10),
     )
-    fig_rank.update_xaxes(tickformat=".1f", title_text="Retorno 12M (%)",
-                          range=[0, max(_mx * 1.25, 0.01)])
+    fig_rank.update_xaxes(tickformat=".1f", title_text="Retorno 12M (%)", range=range_x)
     fig_rank.update_yaxes(automargin=True)
     st.plotly_chart(fig_rank, use_container_width=True)
+
+st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SEÇÃO 7 — EXPORTAR RELATÓRIO PDF DE PEERS
+# ─────────────────────────────────────────────────────────────────────────────
+st.markdown('<div class="section-label">Exportar Relatório Comparativo</div>',
+            unsafe_allow_html=True)
+
+_pdf_col1, _pdf_col2 = st.columns([5, 2])
+with _pdf_col1:
+    _n_peers = len(cnpjs_peers)
+    if _n_peers == 0:
+        st.info(
+            "Selecione ao menos um peer na sidebar para gerar o relatório comparativo. "
+            "Você pode exportar o relatório solo do fundo em **Portfólio do Fundo → Retornos do Fundo**.",
+            icon="ℹ️",
+        )
+    else:
+        st.info(
+            f"Gera um PDF completo de estudo comparativo do fundo analisado com "
+            f"**{_n_peers} peer{'s' if _n_peers > 1 else ''}** selecionado{'s' if _n_peers > 1 else ''}. "
+            f"Inclui: capa, retornos acumulados, retornos mensais, métricas de risco e ranking.",
+            icon="📄",
+        )
+
+with _pdf_col2:
+    _btn_disabled = len(cnpjs_peers) == 0
+    _btn_pdf = st.button(
+        "📄 Gerar PDF de Peers",
+        key="ret_btn_pdf",
+        disabled=_btn_disabled,
+        use_container_width=True,
+    )
+
+if _btn_pdf and not _btn_disabled:
+    with st.spinner("Gerando relatório PDF de peers…"):
+        try:
+            from utils.pdf_peers import gerar_pdf_peers
+            pdf_bytes = gerar_pdf_peers(
+                resultado=resultado,
+                cnpj_alvo=cnpj_alvo,
+                cnpjs_peers=list(cnpjs_peers),
+                nome_map=nome_map,
+                data_inicio=data_inicio_str,
+                data_fim=data_fim_str,
+            )
+            nome_arquivo = (
+                f"peers_{fundo_alvo_sel[:30].replace(' ', '_')}"
+                f"_{data_inicio_str}_{data_fim_str}.pdf"
+            )
+            st.download_button(
+                label="⬇️ Baixar Relatório PDF",
+                data=pdf_bytes,
+                file_name=nome_arquivo,
+                mime="application/pdf",
+                key="ret_download_pdf",
+            )
+            st.success("✅ Relatório gerado com sucesso!")
+        except Exception as e:
+            st.error(f"Erro ao gerar PDF:\n\n{e}")
+

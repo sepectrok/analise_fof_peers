@@ -4,6 +4,26 @@ import numpy as np
 import pandas as pd
 
 
+def shorten(name: str, max_len: int = 50) -> str:
+    """Abrevia nomes de fundos (FIC FI, FIDC, FIDC RL, CP, MM, RF) para exibição."""
+    if not isinstance(name, str):
+        return str(name)
+    s = name.upper()
+    for long, short in [
+        ("FUNDO DE INVESTIMENTO EM COTAS DE FUNDOS DE INVESTIMENTO", "FIC FI"),
+        ("FUNDO DE INVESTIMENTO EM COTAS DE FUNDO DE INVESTIMENTO",  "FIC FI"),
+        ("FUNDO DE INVESTIMENTO EM COTAS", "FIC"),
+        ("FUNDO DE INVESTIMENTO",          "FI"),
+        ("EM DIREITOS CREDITÓRIOS - RESPONSABILIDADE LIMITADA", "FIDC RL"),
+        ("EM DIREITOS CREDITÓRIOS", "FIDC"),
+        ("CRÉDITO PRIVADO", "CP"),
+        ("MULTIMERCADO",    "MM"),
+        ("RENDA FIXA",      "RF"),
+    ]:
+        s = s.replace(long.upper(), short)
+    return s[: max_len - 3] + "..." if len(s) > max_len else s
+
+
 def fmt_pct(val, decimals: int = 3) -> str:
     if val is None or (isinstance(val, float) and np.isnan(val)):
         return "—"

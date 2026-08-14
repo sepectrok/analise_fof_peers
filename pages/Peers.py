@@ -12,6 +12,7 @@ from components.sidebar import load_css
 from components.sidebar_fof import render_sidebar_fof
 from components.charts import PALETTE
 from utils.drive_loader import load_parquet
+from utils.formatters import shorten
 
 load_css()
 
@@ -72,25 +73,6 @@ ATRIBS_ANALISADO = [
     ("Tipo_resgate",      "Tipo Resgate"),
     ("Prazo_resgate",     "Prazo Resgate"),
 ]
-
-
-def shorten(name: str, max_len: int = 55) -> str:
-    if not isinstance(name, str):
-        return str(name)
-    s = name.upper()
-    for long, short in [
-        ("FUNDO DE INVESTIMENTO EM COTAS DE FUNDOS DE INVESTIMENTO", "FIC FI"),
-        ("FUNDO DE INVESTIMENTO EM COTAS DE FUNDO DE INVESTIMENTO", "FIC FI"),
-        ("FUNDO DE INVESTIMENTO EM COTAS", "FIC"),
-        ("FUNDO DE INVESTIMENTO", "FI"),
-        ("EM DIREITOS CREDITÓRIOS - RESPONSABILIDADE LIMITADA", "FIDC RL"),
-        ("EM DIREITOS CREDITÓRIOS", "FIDC"),
-        ("CRÉDITO PRIVADO", "CP"),
-        ("MULTIMERCADO", "MM"),
-        ("RENDA FIXA", "RF"),
-    ]:
-        s = s.replace(long.upper(), short)
-    return s[:max_len - 3] + "..." if len(s) > max_len else s
 
 
 def fmt_brl(v, suffix="M"):
