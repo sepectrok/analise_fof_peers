@@ -161,7 +161,7 @@ def load_historico_cnpjs(cnpjs: tuple[str, ...]) -> pd.DataFrame:
 
     O filtro `is_in(cnpjs)` é aplicado no plano lazy do Polars ANTES do
     `.collect()` (predicate pushdown), então apenas as linhas dos fundos
-    pedidos (tipicamente o fundo alvo + até 3 peers) chegam a virar pandas —
+    pedidos (tipicamente o fundo alvo + até 5 peers) chegam a virar pandas —
     de ~17M linhas / ~2,5GB para tipicamente algumas milhares de linhas /
     poucos MB. `cnpjs` precisa ser uma tupla (hashável) para o cache do
     Streamlit funcionar corretamente.

@@ -196,7 +196,7 @@ with st.sidebar:
             p["nome"] for p in peers_filtrados
             if p.get("nome") != fundo_alvo_sel and p.get("nome") in fundos_disponiveis
         ]
-        peers_default = peers_nome_options[:3]
+        peers_default = peers_nome_options[:5]
     else:
         peers_nome_options = [
             p for p in fundos_disponiveis if p != fundo_alvo_sel
@@ -215,7 +215,7 @@ with st.sidebar:
         "Peers para comparar",
         options=peers_nome_options,
         default=_peers_default_safe,
-        max_selections=3,
+        max_selections=5,
         format_func=shorten,
         key="ret_peers",
         help="Você pode adicionar ou remover peers aqui.",
