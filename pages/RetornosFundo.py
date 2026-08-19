@@ -162,7 +162,7 @@ with st.sidebar:
     )
     data_fim_input = st.date_input(
         "Data fim",
-        value=hoje.date(),
+        value=pd.Timestamp("2026-07-31"),
         key="rfundo_dt_fim",
     )
 
